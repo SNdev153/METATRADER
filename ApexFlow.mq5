@@ -188,6 +188,8 @@ input group "=== 決済ロジック設定 (Zephyr) ===";
 input ENUM_POSITION_MODE InpPositionMode     = MODE_AGGREGATE; // ポジション管理モード
 input ENUM_EXIT_LOGIC    InpExitLogic        = EXIT_UNFAVORABLE; // 分割決済のロジック
 input int                InpSplitCount       = 5;          // 分割決済の回数
+input bool      InpEnableDynamicSplits  = true;    // 【New】スコアで分割数を増やす
+input int       InpHighScoreSplit_Add   = 3;       // 【New】高スコア時に追加する分割数
 input double             InpExitBufferPips   = 1.0;        // 決済バッファ (Pips)
 input int                InpBreakEvenAfterSplits = 2;      // N回分割決済後にBE設定 (0=無効)
 input double             InpHighSchoreTpRratio = 1.5;      // 高スコア時のTP倍率
@@ -428,7 +430,7 @@ void InitGroup(PositionGroup &group, bool isBuy)
 }
 
 //+------------------------------------------------------------------+
-//| ポジショングループの状態を更新する                               |
+//| ポジショングループの状態を更新する (修正版)
 //+------------------------------------------------------------------+
 void ManagePositionGroups()
 {
@@ -436,53 +438,126 @@ void ManagePositionGroups()
     double oldSellLots = sellGroup.initialTotalLotSize;
     double preservedBuyTP = buyGroup.stampedFinalTP;
     double preservedSellTP = sellGroup.stampedFinalTP;
-    InitGroup(buyGroup, true); InitGroup(sellGroup, false);
-    buyGroup.stampedFinalTP = preservedBuyTP; sellGroup.stampedFinalTP = preservedSellTP;
+
+    // 一時的にグループ情報を保存
+    int oldBuySplitsDone = buyGroup.splitsDone;
+    int oldSellSplitsDone = sellGroup.splitsDone;
+
+    InitGroup(buyGroup, true);
+    InitGroup(sellGroup, false);
+
+    buyGroup.stampedFinalTP = preservedBuyTP;
+    sellGroup.stampedFinalTP = preservedSellTP;
+
     double buyWeightedSum = 0, sellWeightedSum = 0;
     double buyTotalScoreLot = 0, sellTotalScoreLot = 0;
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
         ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber) {
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+        {
             double price = PositionGetDouble(POSITION_PRICE_OPEN);
             double volume = PositionGetDouble(POSITION_VOLUME);
             int score = 0;
-            for(int j = 0; j < ArraySize(g_managedPositions); j++) {
-                if(g_managedPositions[j].ticket == ticket) { score = g_managedPositions[j].score; break; }
+            for(int j = 0; j < ArraySize(g_managedPositions); j++)
+            {
+                if(g_managedPositions[j].ticket == ticket)
+                {
+                    score = g_managedPositions[j].score;
+                    break;
+                }
             }
-            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) {
-                buyGroup.isActive = true; buyGroup.totalLotSize += volume;
-                buyWeightedSum += price * volume; int size = ArraySize(buyGroup.positionTickets);
-                ArrayResize(buyGroup.positionTickets, size + 1); buyGroup.positionTickets[size] = ticket;
-                buyTotalScoreLot += score * volume; if(score > buyGroup.highestScore) buyGroup.highestScore = score;
-            } else {
-                sellGroup.isActive = true; sellGroup.totalLotSize += volume;
-                sellWeightedSum += price * volume; int size = ArraySize(sellGroup.positionTickets);
-                ArrayResize(sellGroup.positionTickets, size + 1); sellGroup.positionTickets[size] = ticket;
-                sellTotalScoreLot += score * volume; if(score > sellGroup.highestScore) sellGroup.highestScore = score;
+
+            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+            {
+                buyGroup.isActive = true;
+                buyGroup.totalLotSize += volume;
+                buyWeightedSum += price * volume;
+                int size = ArraySize(buyGroup.positionTickets);
+                ArrayResize(buyGroup.positionTickets, size + 1);
+                buyGroup.positionTickets[size] = ticket;
+                buyTotalScoreLot += score * volume;
+                if(score > buyGroup.highestScore) buyGroup.highestScore = score;
+            }
+            else
+            {
+                sellGroup.isActive = true;
+                sellGroup.totalLotSize += volume;
+                sellWeightedSum += price * volume;
+                int size = ArraySize(sellGroup.positionTickets);
+                ArrayResize(sellGroup.positionTickets, size + 1);
+                sellGroup.positionTickets[size] = ticket;
+                sellTotalScoreLot += score * volume;
+                if(score > sellGroup.highestScore) sellGroup.highestScore = score;
             }
         }
     }
-    if(buyGroup.isActive) {
-        if(buyGroup.totalLotSize > 0) { buyGroup.averageEntryPrice = buyWeightedSum / buyGroup.totalLotSize; buyGroup.averageScore = buyTotalScoreLot / buyGroup.totalLotSize; }
+
+    if(buyGroup.isActive)
+    {
+        if(buyGroup.totalLotSize > 0)
+        {
+            buyGroup.averageEntryPrice = buyWeightedSum / buyGroup.totalLotSize;
+            buyGroup.averageScore = buyTotalScoreLot / buyGroup.totalLotSize;
+        }
         buyGroup.positionCount = ArraySize(buyGroup.positionTickets);
-        if(buyGroup.totalLotSize > oldBuyLots) {
-            buyGroup.initialTotalLotSize = buyGroup.totalLotSize; buyGroup.splitsDone = 0;
-            if (!isBuyTPManuallyMoved) { UpdateZones(); buyGroup.stampedFinalTP = zonalFinalTPLine_Buy; }
-            UpdateGroupSplitLines(buyGroup);
+
+        if(buyGroup.totalLotSize > oldBuyLots) // 新規ポジション追加時
+        {
+            buyGroup.initialTotalLotSize = buyGroup.totalLotSize;
+            buyGroup.splitsDone = 0;
+            if (!isBuyTPManuallyMoved)
+            {
+                UpdateZones();
+                buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
+            }
+            UpdateGroupSplitLines(buyGroup); // 分割ライン更新
         }
-    } else if(oldBuyLots > 0) {
-        DeleteGroupSplitLines(buyGroup); isBuyTPManuallyMoved = false; InitGroup(buyGroup, true);
+        else // ポジション追加がない場合、元の分割回数を維持
+        {
+             buyGroup.initialTotalLotSize = oldBuyLots;
+             buyGroup.splitsDone = oldBuySplitsDone;
+        }
     }
-    if(sellGroup.isActive) {
-        if(sellGroup.totalLotSize > 0) { sellGroup.averageEntryPrice = sellWeightedSum / sellGroup.totalLotSize; sellGroup.averageScore = sellTotalScoreLot / sellGroup.totalLotSize; }
-        sellGroup.positionCount = ArraySize(sellGroup.positionTickets);
-        if(sellGroup.totalLotSize > oldSellLots) {
-            sellGroup.initialTotalLotSize = sellGroup.totalLotSize; sellGroup.splitsDone = 0;
-            if (!isSellTPManuallyMoved) { UpdateZones(); sellGroup.stampedFinalTP = zonalFinalTPLine_Sell; }
-            UpdateGroupSplitLines(sellGroup);
+    else if(oldBuyLots > 0)
+    {
+        DeleteGroupSplitLines(buyGroup);
+        isBuyTPManuallyMoved = false;
+        InitGroup(buyGroup, true);
+    }
+
+    if(sellGroup.isActive)
+    {
+        if(sellGroup.totalLotSize > 0)
+        {
+            sellGroup.averageEntryPrice = sellWeightedSum / sellGroup.totalLotSize;
+            sellGroup.averageScore = sellTotalScoreLot / sellGroup.totalLotSize;
         }
-    } else if(oldSellLots > 0) {
-        DeleteGroupSplitLines(sellGroup); isSellTPManuallyMoved = false; InitGroup(sellGroup, false);
+        sellGroup.positionCount = ArraySize(sellGroup.positionTickets);
+
+        if(sellGroup.totalLotSize > oldSellLots) // 新規ポジション追加時
+        {
+            sellGroup.initialTotalLotSize = sellGroup.totalLotSize;
+            sellGroup.splitsDone = 0;
+            if (!isSellTPManuallyMoved)
+            {
+                UpdateZones();
+                sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
+            }
+            UpdateGroupSplitLines(sellGroup); // 分割ライン更新
+        }
+        else // ポジション追加がない場合、元の分割回数を維持
+        {
+            sellGroup.initialTotalLotSize = oldSellLots;
+            sellGroup.splitsDone = oldSellSplitsDone;
+        }
+    }
+    else if(oldSellLots > 0)
+    {
+        DeleteGroupSplitLines(sellGroup);
+        isSellTPManuallyMoved = false;
+        InitGroup(sellGroup, false);
     }
 }
 
@@ -929,42 +1004,73 @@ void CheckExits() {
 }
 
 //+------------------------------------------------------------------+
-//| 個別モード：新規ポジションの分割決済データを準備する             |
+//| 個別モード：新規ポジションの分割決済データを準備する (修正版)
 //+------------------------------------------------------------------+
-void AddSplitData(ulong ticket) {
+void AddSplitData(ulong ticket)
+{
     if(!PositionSelectByTicket(ticket)) return;
+
     SplitData newSplit;
-    newSplit.ticket = ticket; newSplit.entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+    newSplit.ticket = ticket;
+    newSplit.entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
     newSplit.lotSize = NormalizeDouble(PositionGetDouble(POSITION_VOLUME), 2);
     newSplit.isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-    newSplit.splitsDone = 0; newSplit.openTime = (datetime)PositionGetInteger(POSITION_TIME);
+    newSplit.splitsDone = 0;
+    newSplit.openTime = (datetime)PositionGetInteger(POSITION_TIME);
     newSplit.score = 0;
-    for(int i = 0; i < ArraySize(g_managedPositions); i++) {
-        if(g_managedPositions[i].ticket == ticket) { newSplit.score = g_managedPositions[i].score; break; }
+
+    for(int i = 0; i < ArraySize(g_managedPositions); i++)
+    {
+        if(g_managedPositions[i].ticket == ticket)
+        {
+            newSplit.score = g_managedPositions[i].score;
+            break;
+        }
     }
+
     newSplit.stampedFinalTP = newSplit.isBuy ? zonalFinalTPLine_Buy : zonalFinalTPLine_Sell;
     double tpPrice = newSplit.stampedFinalTP;
-    if(tpPrice <= 0 || tpPrice == DBL_MAX) tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1000 : -1000) * g_pip;
-    if(newSplit.score >= InpScore_High && tpPrice > 0) {
+
+    if(tpPrice <= 0 || tpPrice == DBL_MAX)
+        tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1000 : -1000) * g_pip;
+
+    if(newSplit.score >= InpScore_High && tpPrice > 0)
+    {
         double originalDiff = MathAbs(tpPrice - newSplit.entryPrice);
         tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1 : -1) * (originalDiff * InpHighSchoreTpRratio);
     }
+    newSplit.stampedFinalTP = tpPrice; // 更新したTPを記録
+
     double priceDiff = MathAbs(tpPrice - newSplit.entryPrice);
-    if(InpSplitCount > 0) {
-        ArrayResize(newSplit.splitPrices, InpSplitCount);
-        ArrayResize(newSplit.splitLineNames, InpSplitCount);
-        ArrayResize(newSplit.splitLineTimes, InpSplitCount);
-        double step = priceDiff / InpSplitCount;
-        for(int i = 0; i < InpSplitCount; i++) {
+    
+    // --- ★スコアに応じた分割回数の動的変更 ---
+    int dynamicSplitCount = InpSplitCount;
+    if(InpEnableDynamicSplits && newSplit.score >= InpScore_High)
+    {
+        dynamicSplitCount += InpHighScoreSplit_Add;
+    }
+    // ------
+
+    if(dynamicSplitCount > 0)
+    {
+        ArrayResize(newSplit.splitPrices, dynamicSplitCount);
+        ArrayResize(newSplit.splitLineNames, dynamicSplitCount);
+        ArrayResize(newSplit.splitLineTimes, dynamicSplitCount);
+
+        double step = priceDiff / dynamicSplitCount;
+        for(int i = 0; i < dynamicSplitCount; i++)
+        {
             newSplit.splitPrices[i] = newSplit.isBuy ? newSplit.entryPrice + step * (i + 1) : newSplit.entryPrice - step * (i + 1);
             string lineName = "SplitLine_" + (string)ticket + "_" + (string)i;
             newSplit.splitLineNames[i] = lineName;
             newSplit.splitLineTimes[i] = 0;
+            
             ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, newSplit.splitPrices[i]);
             ObjectSetInteger(0, lineName, OBJPROP_COLOR, newSplit.isBuy ? clrGoldenrod : clrPurple);
             ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
         }
     }
+
     int size = ArraySize(splitPositions);
     ArrayResize(splitPositions, size + 1);
     splitPositions[size] = newSplit;

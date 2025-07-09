@@ -1,11 +1,11 @@
 //+------------------------------------------------------------------+
-//|                                ApexFlowEA.mq5                    |
-//|                         (ZoneEntry + ZephyrSplit)                |
-//|                         Final Corrected Version: 3.1               |
+//|                                                   ApexFlowEA.mq5 |
+//|                                      (ZoneEntry + ZephyrSplit)   |
+//|                                    Final Corrected Version: 4.0  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "3.1"
+#property version   "4.0"
 
 // --- ラインカラー定数
 #define CLR_S1 2970272
@@ -48,8 +48,8 @@ struct Line
 // 保有ポジションの情報を管理するための構造体
 struct PositionInfo
 {
-    long   ticket; // ポジションのチケット番号
-    int    score;  // エントリー時のスコア
+    long ticket; // ポジションのチケット番号
+    int  score;  // エントリー時のスコア
 };
 
 // スコアリングの各要素の検知状況を保持する構造体
@@ -66,26 +66,30 @@ struct ScoreComponentInfo
 };
 
 // 分割決済の順序ロジック
-enum ENUM_EXIT_LOGIC {
+enum ENUM_EXIT_LOGIC
+{
     EXIT_FIFO,        // 先入れ先出し
     EXIT_UNFAVORABLE, // 不利なポジションから決済
     EXIT_FAVORABLE    // 有利なポジションから決済
 };
 
 // TPラインの計算モード
-enum ENUM_TP_MODE {
+enum ENUM_TP_MODE
+{
     MODE_ZIGZAG,
     MODE_PIVOT
 };
 
 // ポジションの管理モード
-enum ENUM_POSITION_MODE {
+enum ENUM_POSITION_MODE
+{
     MODE_AGGREGATE, // 集約モード
     MODE_INDIVIDUAL // 個別モード
 };
 
 // 個別ポジションモードでの分割決済データを管理
-struct SplitData {
+struct SplitData
+{
     ulong    ticket;
     double   entryPrice;
     double   lotSize;
@@ -100,17 +104,20 @@ struct SplitData {
 };
 
 // 集約ポジションモードでのグループデータを管理
-struct PositionGroup {
-    bool     isBuy;
+struct PositionGroup
+{
     bool     isActive;
+    bool     isBuy;
     double   averageEntryPrice;
     double   totalLotSize;
     double   initialTotalLotSize;
+    double   previousTotalLotSize;
     ulong    positionTickets[];
     double   splitPrices[];
     string   splitLineNames[];
     datetime splitLineTimes[];
     int      splitsDone;
+    int      lockedInSplitCount;
     datetime openTime;
     double   stampedFinalTP;
     double   averageScore;
@@ -119,7 +126,8 @@ struct PositionGroup {
 };
 
 // 決済順序をソートするための構造体
-struct SortablePosition {
+struct SortablePosition
+{
     ulong  ticket;
     double openPrice;
 };
@@ -128,128 +136,132 @@ struct SortablePosition {
 // --- 入力パラメータ (日本語表記・コメントを完全維持) ---
 // ==================================================================
 input group "=== エントリーロジック設定 ===";
-input bool   InpUsePivotLines      = true;     // ピボットラインを使用する
-enum ENTRY_MODE { TOUCH_MODE, ZONE_MODE };
-input ENTRY_MODE InpEntryMode        = ZONE_MODE;// エントリーモード
-input bool   InpBreakMode          = true;     // ブレイクモード
-input double InpZonePips           = 50.0;     // ゾーン幅 (pips)
+input bool           InpUsePivotLines        = true;     // ピボットラインを使用する
+enum ENTRY_MODE
+{
+    TOUCH_MODE,
+    ZONE_MODE
+};
+input ENTRY_MODE     InpEntryMode            = ZONE_MODE; // エントリーモード
+input bool           InpBreakMode            = true;     // ブレイクモード
+input double         InpZonePips             = 50.0;     // ゾーン幅 (pips)
 
 input group "=== UI設定 ===";
-input bool   InpShowInfoPanel = true;     // 情報パネルを表示する
-input int    p_panel_x_offset = 10;      // パネルX位置
-input int    p_panel_y_offset = 130;     // パネルY位置
-input bool   InpEnableButtons = true;     // ボタン表示を有効にする
+input bool           InpShowInfoPanel        = true;     // 情報パネルを表示する
+input int            p_panel_x_offset        = 10;       // パネルX位置
+input int            p_panel_y_offset        = 130;      // パネルY位置
+input bool           InpEnableButtons        = true;     // ボタン表示を有効にする
 
 input group "=== 取引設定 ===";
-input double InpLotSize            = 0.1;      // ロットサイズ
-input int    InpMaxPositions       = 5;        // 同方向の最大ポジション数
-input int    InpMagicNumber        = 123456;   // マジックナンバー
-input int    InpDotTimeout         = 600;      // ドット/矢印有効期限 (秒)
+input double         InpLotSize              = 0.1;      // ロットサイズ
+input int            InpMaxPositions         = 5;        // 同方向の最大ポジション数
+input int            InpMagicNumber          = 123456;   // マジックナンバー
+input int            InpDotTimeout           = 600;      // ドット/矢印有効期限 (秒)
 
 input group "--- 動的フィルター設定 ---";
-input bool   InpEnableVolatilityFilter = true; // ボラティリティフィルターを有効にするか
-input double InpAtrMaxRatio          = 1.5;    // エントリーを許可する最大ATR倍率
-input bool   InpEnableTimeFilter     = true;   // 取引時間フィルターを有効にするか
-input int    InpTradingHourStart     = 15;     // 取引開始時間 (サーバー時間)
-input int    InpTradingHourEnd       = 25;     // 取引終了時間 (サーバー時間, 25 = 翌午前1時)
+input bool           InpEnableVolatilityFilter = true;  // ボラティリティフィルターを有効にするか
+input double         InpAtrMaxRatio          = 1.5;      // エントリーを許可する最大ATR倍率
+input bool           InpEnableTimeFilter     = true;     // 取引時間フィルターを有効にするか
+input int            InpTradingHourStart     = 15;       // 取引開始時間 (サーバー時間)
+input int            InpTradingHourEnd       = 25;       // 取引終了時間 (サーバー時間, 25 = 翌午前1時)
 
 input group "--- ダイバージェンスの可視化設定 ---";
-input bool   InpShowDivergenceSignals = true;         // ダイバージェンスサインを表示するか
-input string InpDivSignalPrefix     = "DivSignal_";   // サインのオブジェクト名プレフィックス
-input color  InpBullishDivColor     = clrDeepSkyBlue; // 強気ダイバージェンスの色
-input color  InpBearishDivColor     = clrHotPink;     // 弱気ダイバージェンスの色
-input int    InpDivSymbolCode       = 159;            // サインのシンボルコード (159 = ●)
-input int    InpDivSymbolSize       = 8;              // サインの大きさ
-input double InpDivSymbolOffsetPips = 15.0;            // サインの描画オフセット (Pips)
+input bool           InpShowDivergenceSignals = true;         // ダイバージェンスサインを表示するか
+input string         InpDivSignalPrefix      = "DivSignal_";  // サインのオブジェクト名プレフィックス
+input color          InpBullishDivColor      = clrDeepSkyBlue; // 強気ダイバージェンスの色
+input color          InpBearishDivColor      = clrHotPink;     // 弱気ダイバージェンスの色
+input int            InpDivSymbolCode        = 159;           // サインのシンボルコード (159 = ●)
+input int            InpDivSymbolSize        = 8;             // サインの大きさ
+input double         InpDivSymbolOffsetPips  = 15.0;          // サインの描画オフセット (Pips)
 
 input group "=== MACDスコアリング設定 ===";
-input int    InpScore_Standard       = 4;        // 標準エントリーの最低スコア
-input int    InpScore_High         = 6;        // 高スコアエントリーの最低スコア
+input int            InpScore_Standard       = 4;       // 標準エントリーの最低スコア
+input int            InpScore_High           = 6;       // 高スコアエントリーの最低スコア
 
 input group "--- 執行足MACD (トリガー) ---";
-input ENUM_TIMEFRAMES InpMACD_TF_Exec   = PERIOD_CURRENT; // 時間足 (PERIOD_CURRENT=チャートの時間足)
-input int             InpMACD_Fast_Exec   = 12;           // Fast EMA
-input int             InpMACD_Slow_Exec   = 26;           // Slow EMA
-input int             InpMACD_Signal_Exec = 9;            // Signal SMA
+input ENUM_TIMEFRAMES InpMACD_TF_Exec        = PERIOD_CURRENT; // 時間足 (PERIOD_CURRENT=チャートの時間足)
+input int             InpMACD_Fast_Exec       = 12;             // Fast EMA
+input int             InpMACD_Slow_Exec       = 26;             // Slow EMA
+input int             InpMACD_Signal_Exec     = 9;              // Signal SMA
 
 input group "--- 中期足MACD (コンテキスト) ---";
-input ENUM_TIMEFRAMES InpMACD_TF_Mid    = PERIOD_H1;      // 時間足
-input int             InpMACD_Fast_Mid    = 12;           // Fast EMA
-input int             InpMACD_Slow_Mid    = 26;           // Slow EMA
-input int             InpMACD_Signal_Mid  = 9;            // Signal SMA
+input ENUM_TIMEFRAMES InpMACD_TF_Mid         = PERIOD_H1;      // 時間足
+input int             InpMACD_Fast_Mid        = 12;             // Fast EMA
+input int             InpMACD_Slow_Mid        = 26;             // Slow EMA
+input int             InpMACD_Signal_Mid      = 9;              // Signal SMA
 
 input group "--- 長期足MACD (コンファメーション) ---";
-input ENUM_TIMEFRAMES InpMACD_TF_Long   = PERIOD_H4;      // 時間足
-input int             InpMACD_Fast_Long   = 12;           // Fast EMA
-input int             InpMACD_Slow_Long   = 26;           // Slow EMA
-input int             InpMACD_Signal_Long = 9;            // Signal SMA
+input ENUM_TIMEFRAMES InpMACD_TF_Long        = PERIOD_H4;      // 時間足
+input int             InpMACD_Fast_Long       = 12;             // Fast EMA
+input int             InpMACD_Slow_Long       = 26;             // Slow EMA
+input int             InpMACD_Signal_Long     = 9;              // Signal SMA
 
 input group "=== 決済ロジック設定 (Zephyr) ===";
-input ENUM_POSITION_MODE InpPositionMode     = MODE_AGGREGATE; // ポジション管理モード
-input ENUM_EXIT_LOGIC    InpExitLogic        = EXIT_UNFAVORABLE; // 分割決済のロジック
-input int                InpSplitCount       = 5;          // 分割決済の回数
-input bool      InpEnableDynamicSplits  = true;    // 【New】スコアで分割数を増やす
-input int       InpHighScoreSplit_Add   = 3;       // 【New】高スコア時に追加する分割数
-input double             InpExitBufferPips   = 1.0;        // 決済バッファ (Pips)
-input int                InpBreakEvenAfterSplits = 2;      // N回分割決済後にBE設定 (0=無効)
-input double             InpHighSchoreTpRratio = 1.5;      // 高スコア時のTP倍率
-input ENUM_TP_MODE       InpTPLineMode       = MODE_ZIGZAG;  // TPラインのモード
-input int                InpZigzagDepth      = 12;         // ZigZag: Depth
-input int                InpZigzagDeviation  = 5;          // ZigZag: Deviation
-input int                InpZigzagBackstep   = 3;          // ZigZag: Backstep
+input ENUM_POSITION_MODE InpPositionMode         = MODE_AGGREGATE; // ポジション管理モード
+input ENUM_EXIT_LOGIC    InpExitLogic            = EXIT_UNFAVORABLE; // 分割決済のロジック
+input int                InpSplitCount           = 5;              // 分割決済の回数
+input bool               InpEnableDynamicSplits  = true;           // スコアで分割数を増やす
+input int                InpHighScoreSplit_Add   = 3;              // 高スコア時に追加する分割数
+input double             InpExitBufferPips       = 1.0;            // 決済バッファ (Pips)
+input int                InpBreakEvenAfterSplits = 2;              // N回分割決済後にBE設定 (0=無効)
+input double             InpHighSchoreTpRratio   = 1.5;            // 高スコア時のTP倍率
+input ENUM_TP_MODE       InpTPLineMode           = MODE_ZIGZAG;    // TPラインのモード
+input int                InpZigzagDepth          = 12;             // ZigZag: Depth
+input int                InpZigzagDeviation      = 5;              // ZigZag: Deviation
+input int                InpZigzagBackstep       = 3;              // ZigZag: Backstep
 
 input group "=== ピボットライン設定 ===";
-input ENUM_TIMEFRAMES InpPivotPeriod      = PERIOD_H1;    // ピボット時間足
-input bool            InpShowS2R2         = true;         // S2/R2ラインを表示
-input bool            InpShowS3R3         = true;         // S3/R3ラインを表示
-input bool            InpAllowOuterTouch  = false;        // ライン外側からのタッチ/ブレイク検知を許可
+input ENUM_TIMEFRAMES InpPivotPeriod          = PERIOD_H1;    // ピボット時間足
+input bool            InpShowS2R2             = true;         // S2/R2ラインを表示
+input bool            InpShowS3R3             = true;         // S3/R3ラインを表示
+input bool            InpAllowOuterTouch      = false;        // ライン外側からのタッチ/ブレイク検知を許可
 
 input group "=== 手動ライン設定 ===";
-input color           p_ManualSupport_Color = clrDodgerBlue; // 手動サポートラインの色
-input color           p_ManualResist_Color  = clrTomato;     // 手動レジスタンスラインの色
-input ENUM_LINE_STYLE p_ManualLine_Style    = STYLE_DOT;     // 手動ラインのスタイル
-input int             p_ManualLine_Width    = 2;             // 手動ラインの太さ
+input color           p_ManualSupport_Color   = clrDodgerBlue; // 手動サポートラインの色
+input color           p_ManualResist_Color    = clrTomato;     // 手動レジスタンスラインの色
+input ENUM_LINE_STYLE p_ManualLine_Style      = STYLE_DOT;     // 手動ラインのスタイル
+input int             p_ManualLine_Width      = 2;             // 手動ラインの太さ
 
 input group "=== オブジェクトとシグナルの外観 ===";
-input string InpLinePrefix_Pivot     = "Pivot_";       // ピボットラインプレフィックス
-input string InpDotPrefix           = "Dot_";         // ドットプレフィックス
-input string InpArrowPrefix         = "Trigger_";     // 矢印プレフィックス
-input int    InpSignalWidth         = 2;              // シグナルの太さ
-input int    InpSignalFontSize      = 10;             // シグナルの大きさ
-input double InpSignalOffsetPips    = 2.0;            // シグナルの描画オフセット (Pips)
-input int    InpTouchBreakUpCode    = 221;            // タッチブレイク買いのシンボルコード
-input int    InpTouchBreakDownCode  = 222;            // タッチブレイク売りのシンボルコード
-input int    InpTouchReboundUpCode  = 233;            // タッチひげ反発買いのシンボルコード
-input int    InpTouchReboundDownCode= 234;            // タッチひげ反発売りのシンボルコード
-input int    InpZoneReboundBuyCode  = 231;            // ゾーン内反発 (買い) のシンボルコード
-input int    InpZoneReboundSellCode = 232;            // ゾーン内反発 (売り) のシンボルコード
-input int    InpVReversalBuyCode    = 233;            // V字回復 (買い) のシンボルコード
-input int    InpVReversalSellCode   = 234;            // V字回復 (売り) のシンボルコード
-input int    InpRetestBuyCode       = 110;            // ブレイク＆リテスト (買い) のシンボルコード
-input int    InpRetestSellCode      = 111;            // ブレイク＆リテスト (売り) のシンボルコード
+input string InpLinePrefix_Pivot     = "Pivot_";     // ピボットラインプレフィックス
+input string InpDotPrefix            = "Dot_";       // ドットプレフィックス
+input string InpArrowPrefix          = "Trigger_";   // 矢印プレフィックス
+input int    InpSignalWidth          = 2;            // シグナルの太さ
+input int    InpSignalFontSize       = 10;           // シグナルの大きさ
+input double InpSignalOffsetPips     = 2.0;          // シグナルの描画オフセット (Pips)
+input int    InpTouchBreakUpCode     = 221;          // タッチブレイク買いのシンボルコード
+input int    InpTouchBreakDownCode   = 222;          // タッチブレイク売りのシンボルコード
+input int    InpTouchReboundUpCode   = 233;          // タッチひげ反発買いのシンボルコード
+input int    InpTouchReboundDownCode = 234;          // タッチひげ反発売りのシンボルコード
+input int    InpZoneReboundBuyCode   = 231;          // ゾーン内反発 (買い) のシンボルコード
+input int    InpZoneReboundSellCode  = 232;          // ゾーン内反発 (売り) のシンボルコード
+input int    InpVReversalBuyCode     = 233;          // V字回復 (買い) のシンボルコード
+input int    InpVReversalSellCode    = 234;          // V字回復 (売り) のシンボルコード
+input int    InpRetestBuyCode        = 110;          // ブレイク＆リテスト (買い) のシンボルコード
+input int    InpRetestSellCode       = 111;          // ブレイク＆リテスト (売り) のシンボルコード
 
 // ==================================================================
 // --- グローバル変数 ---
 // ==================================================================
-double   g_pip;
-Line     allLines[];
+double       g_pip;
+Line         allLines[];
 PositionInfo g_managedPositions[];
-int      h_macd_exec, h_macd_mid, h_macd_long, h_atr;
-datetime lastBar[2];
-datetime lastArrowTime = 0;
-bool     g_isDrawingMode = false;
-string   g_buttonName           = "DrawManualLineButton";
-string   g_clearButtonName      = "ClearSignalsButton";
-string   g_clearLinesButtonName = "ClearLinesButton";
-string   g_panelPrefix          = "InfoPanel_";
-double   s1, r1, s2, r2, s3, r3, pivot;
+int          h_macd_exec, h_macd_mid, h_macd_long, h_atr;
+datetime     lastBar[2];
+datetime     lastArrowTime = 0;
+bool         g_isDrawingMode = false;
+string       g_buttonName           = "DrawManualLineButton";
+string       g_clearButtonName      = "ClearSignalsButton";
+string       g_clearLinesButtonName = "ClearLinesButton";
+string       g_panelPrefix          = "InfoPanel_";
+double       s1, r1, s2, r2, s3, r3, pivot;
 PositionGroup buyGroup;
 PositionGroup sellGroup;
-SplitData     splitPositions[];
-int           zigzagHandle;
-double        zonalFinalTPLine_Buy, zonalFinalTPLine_Sell;
-bool          isBuyTPManuallyMoved = false, isSellTPManuallyMoved = false;
-datetime      lastTradeTime;
+SplitData    splitPositions[];
+int          zigzagHandle;
+double       zonalFinalTPLine_Buy, zonalFinalTPLine_Sell;
+bool         isBuyTPManuallyMoved = false, isSellTPManuallyMoved = false;
+datetime     lastTradeTime;
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -298,25 +310,39 @@ void DeleteGroupSplitLines(PositionGroup &group);
 // ==================================================================
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数                                           |
+//| エキスパート初期化関数                                         |
 //+------------------------------------------------------------------+
 int OnInit()
 {
     g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
-    lastBar[0] = 0; lastBar[1] = 0; lastTradeTime = 0;
+    lastBar[0] = 0;
+    lastBar[1] = 0;
+    lastTradeTime = 0;
     h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
     h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
     zigzagHandle = iCustom(_Symbol, _Period, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-    if(h_macd_exec==INVALID_HANDLE || h_macd_mid==INVALID_HANDLE || h_macd_long==INVALID_HANDLE || zigzagHandle==INVALID_HANDLE) {
-        Print("インジケータハンドルの作成に失敗しました。"); return(INIT_FAILED);
+    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE)
+    {
+        Print("インジケータハンドルの作成に失敗しました。");
+        return(INIT_FAILED);
     }
-    if (InpPositionMode == MODE_AGGREGATE) { InitGroup(buyGroup, true); InitGroup(sellGroup, false); }
-    else { ArrayResize(splitPositions, 0); }
+    if (InpPositionMode == MODE_AGGREGATE)
+    {
+        InitGroup(buyGroup, true);
+        InitGroup(sellGroup, false);
+    }
+    else
+    {
+        ArrayResize(splitPositions, 0);
+    }
     UpdateLines();
-    if(InpEnableButtons) {
-        CreateManualLineButton(); CreateClearButton(); CreateClearLinesButton();
+    if(InpEnableButtons)
+    {
+        CreateManualLineButton();
+        CreateClearButton();
+        CreateClearLinesButton();
         CreateApexButton(BUTTON_BUY_CLOSE_ALL, 140, 50, 100, 20, "BUY 全決済", clrDodgerBlue);
         CreateApexButton(BUTTON_SELL_CLOSE_ALL, 140, 75, 100, 20, "SELL 全決済", clrTomato);
         CreateApexButton(BUTTON_ALL_CLOSE, 245, 50, 100, 20, "全決済", clrGray);
@@ -324,8 +350,7 @@ int OnInit()
         CreateApexButton(BUTTON_RESET_SELL_TP, 245, 100, 100, 20, "SELL TPリセット", clrGoldenrod);
     }
     ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
-    EventSetMillisecondTimer(100);
-    Print("ApexFlowEA v3.1 初期化完了");
+    Print("ApexFlowEA v4.0 初期化完了");
     return(INIT_SUCCEEDED);
 }
 
@@ -334,15 +359,28 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-    EventKillTimer();
-    ObjectsDeleteAll(0, g_buttonName); ObjectsDeleteAll(0, g_clearButtonName); ObjectsDeleteAll(0, g_clearLinesButtonName);
-    ObjectsDeleteAll(0, g_panelPrefix); ObjectsDeleteAll(0, InpLinePrefix_Pivot);
-    ObjectsDeleteAll(0, InpDotPrefix); ObjectsDeleteAll(0, InpArrowPrefix); ObjectsDeleteAll(0, InpDivSignalPrefix);
-    ObjectsDeleteAll(0, "ManualTrend_"); ObjectsDeleteAll(0, BUTTON_BUY_CLOSE_ALL); ObjectsDeleteAll(0, BUTTON_SELL_CLOSE_ALL);
-    ObjectsDeleteAll(0, BUTTON_ALL_CLOSE); ObjectsDeleteAll(0, BUTTON_RESET_BUY_TP); ObjectsDeleteAll(0, BUTTON_RESET_SELL_TP);
-    ObjectsDeleteAll(0, "TPLine_Buy"); ObjectsDeleteAll(0, "TPLine_Sell"); ObjectsDeleteAll(0, "SplitLine_");
-    IndicatorRelease(h_macd_exec); IndicatorRelease(h_macd_mid); IndicatorRelease(h_macd_long);
-    IndicatorRelease(h_atr); IndicatorRelease(zigzagHandle);
+    ObjectsDeleteAll(0, g_buttonName);
+    ObjectsDeleteAll(0, g_clearButtonName);
+    ObjectsDeleteAll(0, g_clearLinesButtonName);
+    ObjectsDeleteAll(0, g_panelPrefix);
+    ObjectsDeleteAll(0, InpLinePrefix_Pivot);
+    ObjectsDeleteAll(0, InpDotPrefix);
+    ObjectsDeleteAll(0, InpArrowPrefix);
+    ObjectsDeleteAll(0, InpDivSignalPrefix);
+    ObjectsDeleteAll(0, "ManualTrend_");
+    ObjectsDeleteAll(0, BUTTON_BUY_CLOSE_ALL);
+    ObjectsDeleteAll(0, BUTTON_SELL_CLOSE_ALL);
+    ObjectsDeleteAll(0, BUTTON_ALL_CLOSE);
+    ObjectsDeleteAll(0, BUTTON_RESET_BUY_TP);
+    ObjectsDeleteAll(0, BUTTON_RESET_SELL_TP);
+    ObjectsDeleteAll(0, "TPLine_Buy");
+    ObjectsDeleteAll(0, "TPLine_Sell");
+    ObjectsDeleteAll(0, "SplitLine_");
+    IndicatorRelease(h_macd_exec);
+    IndicatorRelease(h_macd_mid);
+    IndicatorRelease(h_macd_long);
+    IndicatorRelease(h_atr);
+    IndicatorRelease(zigzagHandle);
     PrintFormat("ApexFlowEA 終了: 理由=%d", reason);
 }
 
@@ -351,18 +389,34 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    if(IsNewBar(InpPivotPeriod)) { UpdateLines(); }
-    if(IsNewBar(PERIOD_M5)) {
+    if(IsNewBar(InpPivotPeriod))
+    {
+        UpdateLines();
+    }
+    if(IsNewBar(PERIOD_M5))
+    {
         SyncManagedPositions();
-        UpdateZones();
-        if (InpPositionMode == MODE_AGGREGATE) {
-            ManagePositionGroups(); CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup);
-        } else {
-            DetectNewEntrances(); CheckExits();
+        if (InpPositionMode == MODE_AGGREGATE)
+        {
+            ManagePositionGroups();
         }
+        else
+        {
+            DetectNewEntrances();
+        }
+        if (InpPositionMode == MODE_AGGREGATE)
+        {
+            CheckExitForGroup(buyGroup);
+            CheckExitForGroup(sellGroup);
+        }
+        else
+        {
+            CheckExits();
+        }
+        CheckEntry();
+        UpdateZones();
         ManageInfoPanel();
         ManageManualLines();
-        CheckEntry();
     }
 }
 
@@ -371,34 +425,102 @@ void OnTick()
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
-    if(id == CHARTEVENT_OBJECT_CLICK) {
-        if(sparam == g_buttonName) { g_isDrawingMode = !g_isDrawingMode; UpdateButtonState(); return; }
-        if(sparam == g_clearButtonName) { ClearSignalObjects(); return; }
-        if(sparam == g_clearLinesButtonName) { ClearManualLines(); return; }
-        if(sparam == BUTTON_BUY_CLOSE_ALL) { if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup); return; }
-        if(sparam == BUTTON_SELL_CLOSE_ALL) { if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup); return; }
-        if(sparam == BUTTON_ALL_CLOSE) { if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup); if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup); return; }
-        if(sparam == BUTTON_RESET_BUY_TP) { isBuyTPManuallyMoved = false; UpdateZones(); if(buyGroup.isActive) { buyGroup.stampedFinalTP = zonalFinalTPLine_Buy; UpdateGroupSplitLines(buyGroup); } ChartRedraw(); return; }
-        if(sparam == BUTTON_RESET_SELL_TP) { isSellTPManuallyMoved = false; UpdateZones(); if(sellGroup.isActive) { sellGroup.stampedFinalTP = zonalFinalTPLine_Sell; UpdateGroupSplitLines(sellGroup); } ChartRedraw(); return; }
+    if(id == CHARTEVENT_OBJECT_CLICK)
+    {
+        if(sparam == g_buttonName)
+        {
+            g_isDrawingMode = !g_isDrawingMode;
+            UpdateButtonState();
+            return;
+        }
+        if(sparam == g_clearButtonName)
+        {
+            ClearSignalObjects();
+            return;
+        }
+        if(sparam == g_clearLinesButtonName)
+        {
+            ClearManualLines();
+            return;
+        }
+        if(sparam == BUTTON_BUY_CLOSE_ALL)
+        {
+            if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup);
+            return;
+        }
+        if(sparam == BUTTON_SELL_CLOSE_ALL)
+        {
+            if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup);
+            return;
+        }
+        if(sparam == BUTTON_ALL_CLOSE)
+        {
+            if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup);
+            if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup);
+            return;
+        }
+        if(sparam == BUTTON_RESET_BUY_TP)
+        {
+            isBuyTPManuallyMoved = false;
+            UpdateZones();
+            if(buyGroup.isActive)
+            {
+                buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
+                UpdateGroupSplitLines(buyGroup);
+            }
+            ChartRedraw();
+            return;
+        }
+        if(sparam == BUTTON_RESET_SELL_TP)
+        {
+            isSellTPManuallyMoved = false;
+            UpdateZones();
+            if(sellGroup.isActive)
+            {
+                sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
+                UpdateGroupSplitLines(sellGroup);
+            }
+            ChartRedraw();
+            return;
+        }
     }
-    if(id == CHARTEVENT_CLICK && g_isDrawingMode) {
-        int sub; datetime t; double p;
+    if(id == CHARTEVENT_CLICK && g_isDrawingMode)
+    {
+        int sub;
+        datetime t;
+        double p;
         if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, sub, t, p) && sub == 0) DrawManualTrendLine(p, t);
         return;
     }
-    if (id == CHARTEVENT_OBJECT_DRAG && (sparam == "TPLine_Buy" || sparam == "TPLine_Sell")) {
+    if (id == CHARTEVENT_OBJECT_DRAG && (sparam == "TPLine_Buy" || sparam == "TPLine_Sell"))
+    {
         double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
-        if(sparam == "TPLine_Buy") {
-            if (!isBuyTPManuallyMoved || zonalFinalTPLine_Buy != newPrice) {
-                isBuyTPManuallyMoved = true; zonalFinalTPLine_Buy = newPrice;
+        if(sparam == "TPLine_Buy")
+        {
+            if (!isBuyTPManuallyMoved || zonalFinalTPLine_Buy != newPrice)
+            {
+                isBuyTPManuallyMoved = true;
+                zonalFinalTPLine_Buy = newPrice;
                 ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-                if(buyGroup.isActive) { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); }
+                if(buyGroup.isActive)
+                {
+                    buyGroup.stampedFinalTP = newPrice;
+                    UpdateGroupSplitLines(buyGroup);
+                }
             }
-        } else {
-            if (!isSellTPManuallyMoved || zonalFinalTPLine_Sell != newPrice) {
-                isSellTPManuallyMoved = true; zonalFinalTPLine_Sell = newPrice;
+        }
+        else
+        {
+            if (!isSellTPManuallyMoved || zonalFinalTPLine_Sell != newPrice)
+            {
+                isSellTPManuallyMoved = true;
+                zonalFinalTPLine_Sell = newPrice;
                 ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-                if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup); }
+                if(sellGroup.isActive)
+                {
+                    sellGroup.stampedFinalTP = newPrice;
+                    UpdateGroupSplitLines(sellGroup);
+                }
             }
         }
         ChartRedraw();
@@ -414,44 +536,44 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 void InitGroup(PositionGroup &group, bool isBuy)
 {
-    group.isBuy = isBuy; group.isActive = false; group.averageEntryPrice = 0;
-    group.totalLotSize = 0; group.initialTotalLotSize = 0; group.splitsDone = 0;
-    group.openTime = 0; group.stampedFinalTP = 0; group.averageScore = 0;
-    group.highestScore = 0; group.positionCount = 0; ArrayResize(group.positionTickets, 0);
-    if(InpSplitCount > 0) {
-        ArrayResize(group.splitPrices, InpSplitCount);
-        ArrayResize(group.splitLineNames, InpSplitCount);
-        ArrayResize(group.splitLineTimes, InpSplitCount);
-        for(int i = 0; i < InpSplitCount; i++) {
-            group.splitLineNames[i] = "SplitLine_" + (isBuy ? "BUY" : "SELL") + "_" + (string)i;
-            group.splitLineTimes[i] = 0;
-        }
-    }
+    group.isBuy = isBuy;
+    group.isActive = false;
+    group.averageEntryPrice = 0;
+    group.totalLotSize = 0;
+    group.initialTotalLotSize = 0;
+    group.previousTotalLotSize = 0;
+    group.splitsDone = 0;
+    group.lockedInSplitCount = 0;
+    group.openTime = 0;
+    group.stampedFinalTP = 0;
+    group.averageScore = 0;
+    group.highestScore = 0;
+    group.positionCount = 0;
+    ArrayFree(group.positionTickets);
+    ArrayFree(group.splitPrices);
+    ArrayFree(group.splitLineNames);
+    ArrayFree(group.splitLineTimes);
 }
 
 //+------------------------------------------------------------------+
-//| ポジショングループの状態を更新する (修正版)
+//| ポジショングループの状態を更新する                               |
 //+------------------------------------------------------------------+
 void ManagePositionGroups()
 {
-    double oldBuyLots = buyGroup.initialTotalLotSize;
-    double oldSellLots = sellGroup.initialTotalLotSize;
-    double preservedBuyTP = buyGroup.stampedFinalTP;
-    double preservedSellTP = sellGroup.stampedFinalTP;
-
-    // 一時的にグループ情報を保存
-    int oldBuySplitsDone = buyGroup.splitsDone;
-    int oldSellSplitsDone = sellGroup.splitsDone;
-
-    InitGroup(buyGroup, true);
-    InitGroup(sellGroup, false);
-
-    buyGroup.stampedFinalTP = preservedBuyTP;
-    sellGroup.stampedFinalTP = preservedSellTP;
-
+    PositionGroup oldBuyGroup = buyGroup;
+    PositionGroup oldSellGroup = sellGroup;
+    buyGroup.previousTotalLotSize = oldBuyGroup.totalLotSize;
+    sellGroup.previousTotalLotSize = oldSellGroup.totalLotSize;
+    buyGroup.totalLotSize = 0;
+    sellGroup.totalLotSize = 0;
+    buyGroup.highestScore = 0;
+    sellGroup.highestScore = 0;
+    ArrayFree(buyGroup.positionTickets);
+    ArrayFree(sellGroup.positionTickets);
+    buyGroup.isActive = false;
+    sellGroup.isActive = false;
     double buyWeightedSum = 0, sellWeightedSum = 0;
     double buyTotalScoreLot = 0, sellTotalScoreLot = 0;
-
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         ulong ticket = PositionGetTicket(i);
@@ -468,7 +590,6 @@ void ManagePositionGroups()
                     break;
                 }
             }
-
             if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
             {
                 buyGroup.isActive = true;
@@ -493,7 +614,6 @@ void ManagePositionGroups()
             }
         }
     }
-
     if(buyGroup.isActive)
     {
         if(buyGroup.totalLotSize > 0)
@@ -502,31 +622,36 @@ void ManagePositionGroups()
             buyGroup.averageScore = buyTotalScoreLot / buyGroup.totalLotSize;
         }
         buyGroup.positionCount = ArraySize(buyGroup.positionTickets);
-
-        if(buyGroup.totalLotSize > oldBuyLots) // 新規ポジション追加時
+        if(!oldBuyGroup.isActive)
         {
             buyGroup.initialTotalLotSize = buyGroup.totalLotSize;
             buyGroup.splitsDone = 0;
-            if (!isBuyTPManuallyMoved)
+            buyGroup.lockedInSplitCount = InpSplitCount;
+            if(InpEnableDynamicSplits && buyGroup.highestScore >= InpScore_High)
+            {
+                buyGroup.lockedInSplitCount += InpHighScoreSplit_Add;
+            }
+            if(!isBuyTPManuallyMoved)
             {
                 UpdateZones();
                 buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
             }
-            UpdateGroupSplitLines(buyGroup); // 分割ライン更新
         }
-        else // ポジション追加がない場合、元の分割回数を維持
+        else
         {
-             buyGroup.initialTotalLotSize = oldBuyLots;
-             buyGroup.splitsDone = oldBuySplitsDone;
+            buyGroup.initialTotalLotSize = oldBuyGroup.initialTotalLotSize;
+            buyGroup.splitsDone = oldBuyGroup.splitsDone;
+            buyGroup.lockedInSplitCount = oldBuyGroup.lockedInSplitCount;
+            buyGroup.stampedFinalTP = oldBuyGroup.stampedFinalTP;
         }
+        UpdateGroupSplitLines(buyGroup);
     }
-    else if(oldBuyLots > 0)
+    else if(oldBuyGroup.isActive)
     {
         DeleteGroupSplitLines(buyGroup);
         isBuyTPManuallyMoved = false;
         InitGroup(buyGroup, true);
     }
-
     if(sellGroup.isActive)
     {
         if(sellGroup.totalLotSize > 0)
@@ -535,25 +660,31 @@ void ManagePositionGroups()
             sellGroup.averageScore = sellTotalScoreLot / sellGroup.totalLotSize;
         }
         sellGroup.positionCount = ArraySize(sellGroup.positionTickets);
-
-        if(sellGroup.totalLotSize > oldSellLots) // 新規ポジション追加時
+        if(!oldSellGroup.isActive)
         {
             sellGroup.initialTotalLotSize = sellGroup.totalLotSize;
             sellGroup.splitsDone = 0;
-            if (!isSellTPManuallyMoved)
+            sellGroup.lockedInSplitCount = InpSplitCount;
+            if(InpEnableDynamicSplits && sellGroup.highestScore >= InpScore_High)
+            {
+                sellGroup.lockedInSplitCount += InpHighScoreSplit_Add;
+            }
+            if(!isSellTPManuallyMoved)
             {
                 UpdateZones();
                 sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
             }
-            UpdateGroupSplitLines(sellGroup); // 分割ライン更新
         }
-        else // ポジション追加がない場合、元の分割回数を維持
+        else
         {
-            sellGroup.initialTotalLotSize = oldSellLots;
-            sellGroup.splitsDone = oldSellSplitsDone;
+            sellGroup.initialTotalLotSize = oldSellGroup.initialTotalLotSize;
+            sellGroup.splitsDone = oldSellGroup.splitsDone;
+            sellGroup.lockedInSplitCount = oldSellGroup.lockedInSplitCount;
+            sellGroup.stampedFinalTP = oldSellGroup.stampedFinalTP;
         }
+        UpdateGroupSplitLines(sellGroup);
     }
-    else if(oldSellLots > 0)
+    else if(oldSellGroup.isActive)
     {
         DeleteGroupSplitLines(sellGroup);
         isSellTPManuallyMoved = false;
@@ -561,45 +692,61 @@ void ManagePositionGroups()
     }
 }
 
+
 //+------------------------------------------------------------------+
 //| ZigZagに基づくTPラインを更新する                                 |
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
-    double zigzag[]; ArraySetAsSeries(zigzag, true);
+    double zigzag[];
+    ArraySetAsSeries(zigzag, true);
     if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) <= 0) return;
     double levelHigh = 0, levelLow = DBL_MAX;
-    for(int i = 0; i < 100; i++) {
-        if(zigzag[i] > 0) {
+    for(int i = 0; i < 100; i++)
+    {
+        if(zigzag[i] > 0)
+        {
             if(zigzag[i] > levelHigh) levelHigh = zigzag[i];
             if(zigzag[i] < levelLow) levelLow = zigzag[i];
         }
     }
-    if(!isBuyTPManuallyMoved) {
+    if(!isBuyTPManuallyMoved)
+    {
         double newBuyTP = (levelHigh > 0) ? levelHigh : 0;
-        if(buyGroup.isActive && buyGroup.highestScore >= InpScore_High && newBuyTP > 0) {
-            double entryPrice = buyGroup.averageEntryPrice; double originalDiff = newBuyTP - entryPrice;
+        if(buyGroup.isActive && buyGroup.highestScore >= InpScore_High && newBuyTP > 0)
+        {
+            double entryPrice = buyGroup.averageEntryPrice;
+            double originalDiff = newBuyTP - entryPrice;
             if(originalDiff > 0) newBuyTP = entryPrice + (originalDiff * InpHighSchoreTpRratio);
         }
-        if (newBuyTP > 0 && MathAbs(newBuyTP - zonalFinalTPLine_Buy) > g_pip) {
-            zonalFinalTPLine_Buy = newBuyTP; string name = "TPLine_Buy";
+        if (newBuyTP > 0 && MathAbs(newBuyTP - zonalFinalTPLine_Buy) > g_pip)
+        {
+            zonalFinalTPLine_Buy = newBuyTP;
+            string name = "TPLine_Buy";
             if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
             ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy);
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
+            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
             ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
         }
     }
-    if(!isSellTPManuallyMoved) {
+    if(!isSellTPManuallyMoved)
+    {
         double newSellTP = (levelLow < DBL_MAX) ? levelLow : 0;
-        if(sellGroup.isActive && sellGroup.highestScore >= InpScore_High && newSellTP > 0) {
-            double entryPrice = sellGroup.averageEntryPrice; double originalDiff = entryPrice - newSellTP;
+        if(sellGroup.isActive && sellGroup.highestScore >= InpScore_High && newSellTP > 0)
+        {
+            double entryPrice = sellGroup.averageEntryPrice;
+            double originalDiff = entryPrice - newSellTP;
             if(originalDiff > 0) newSellTP = entryPrice - (originalDiff * InpHighSchoreTpRratio);
         }
-        if (newSellTP > 0 && MathAbs(newSellTP - zonalFinalTPLine_Sell) > g_pip) {
-            zonalFinalTPLine_Sell = newSellTP; string name = "TPLine_Sell";
+        if (newSellTP > 0 && MathAbs(newSellTP - zonalFinalTPLine_Sell) > g_pip)
+        {
+            zonalFinalTPLine_Sell = newSellTP;
+            string name = "TPLine_Sell";
             if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
             ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell);
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple);
+            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
             ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
         }
     }
@@ -611,16 +758,21 @@ void UpdateZones()
 void UpdateGroupSplitLines(PositionGroup &group)
 {
     DeleteGroupSplitLines(group);
-    if(!group.isActive || InpSplitCount <= 0) return;
+    if(!group.isActive || group.lockedInSplitCount <= 0) return;
     double tpPrice = group.stampedFinalTP;
     if(tpPrice <= 0 || tpPrice == DBL_MAX) return;
-    double step = MathAbs(tpPrice - group.averageEntryPrice) / InpSplitCount;
-    for(int i = 0; i < InpSplitCount; i++) {
+    ArrayResize(group.splitPrices, group.lockedInSplitCount);
+    ArrayResize(group.splitLineNames, group.lockedInSplitCount);
+    ArrayResize(group.splitLineTimes, group.lockedInSplitCount);
+    double step = MathAbs(tpPrice - group.averageEntryPrice) / group.lockedInSplitCount;
+    for(int i = 0; i < group.lockedInSplitCount; i++)
+    {
         group.splitPrices[i] = group.averageEntryPrice + (group.isBuy ? 1 : -1) * step * (i + 1);
-        string name = group.splitLineNames[i];
-        ObjectCreate(0, name, OBJ_HLINE, 0, 0, group.splitPrices[i]);
-        ObjectSetInteger(0, name, OBJPROP_COLOR, group.isBuy ? clrGoldenrod : clrPurple);
-        ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_DOT);
+        group.splitLineNames[i] = "SplitLine_" + (group.isBuy ? "BUY" : "SELL") + "_" + (string)i;
+        group.splitLineTimes[i] = 0;
+        ObjectCreate(0, group.splitLineNames[i], OBJ_HLINE, 0, 0, group.splitPrices[i]);
+        ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_COLOR, group.isBuy ? clrGoldenrod : clrPurple);
+        ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_STYLE, STYLE_DOT);
     }
 }
 
@@ -638,26 +790,53 @@ void DeleteGroupSplitLines(PositionGroup &group)
 //+------------------------------------------------------------------+
 void CheckExitForGroup(PositionGroup &group)
 {
-    if (!group.isActive || group.splitsDone >= InpSplitCount || InpSplitCount <= 0) return;
+    if (!group.isActive) return;
+    int effectiveSplitCount = group.lockedInSplitCount;
+    if (group.splitsDone >= effectiveSplitCount || effectiveSplitCount <= 0) return;
     double price = group.isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double nextSplit = group.splitPrices[group.splitsDone];
-    if(nextSplit == 0) return;
+    double nextSplitPrice = group.splitPrices[group.splitsDone];
+    if(nextSplitPrice == 0) return;
     double buffer = InpExitBufferPips * g_pip;
-    bool reached = (group.isBuy && price >= nextSplit - buffer) || (!group.isBuy && price <= nextSplit + buffer);
-    if(reached) {
-        double lotToClose = NormalizeDouble(group.initialTotalLotSize / InpSplitCount, 2);
+    bool reached = (group.isBuy && price >= nextSplitPrice - buffer) || (!group.isBuy && price <= nextSplitPrice + buffer);
+    if(reached)
+    {
+        double lotToClose = 0.0;
         double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-        if(lotToClose < minLot) lotToClose = minLot;
-        if (group.splitsDone == InpSplitCount - 1) {
-            CloseAllPositionsInGroup(group); group.splitsDone++;
-        } else {
-            if(ExecuteGroupSplitExit(group, lotToClose)) {
+        double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+        if (group.splitsDone == effectiveSplitCount - 1)
+        {
+            lotToClose = group.totalLotSize;
+        }
+        else
+        {
+            double baseLot = floor(group.initialTotalLotSize / effectiveSplitCount / volStep) * volStep;
+            double remainderLot = NormalizeDouble(group.initialTotalLotSize - (baseLot * effectiveSplitCount), 2);
+            int upgradeCount = (int)round(remainderLot / volStep);
+            lotToClose = baseLot;
+            if(group.splitsDone < upgradeCount)
+            {
+                lotToClose += volStep;
+            }
+        }
+        lotToClose = NormalizeDouble(lotToClose, 2);
+        if (lotToClose > 0 && lotToClose < minLot)
+        {
+            lotToClose = minLot;
+        }
+        if (lotToClose > 0 && lotToClose >= minLot)
+        {
+            if(ExecuteGroupSplitExit(group, lotToClose))
+            {
                 group.splitsDone++;
-                if(InpBreakEvenAfterSplits > 0 && group.splitsDone >= InpBreakEvenAfterSplits) SetBreakEvenForGroup(group);
+                if(InpBreakEvenAfterSplits > 0 && group.splitsDone >= InpBreakEvenAfterSplits)
+                {
+                    SetBreakEvenForGroup(group);
+                }
             }
         }
     }
 }
+
 
 //+------------------------------------------------------------------+
 //| グループの分割決済を実行する                                     |
@@ -666,44 +845,79 @@ bool ExecuteGroupSplitExit(PositionGroup &group, double lotToClose)
 {
     int ticketCount = ArraySize(group.positionTickets);
     if (ticketCount == 0) return false;
-    SortablePosition positionsToSort[]; ArrayResize(positionsToSort, ticketCount);
-    for (int i = 0; i < ticketCount; i++) {
-        if (PositionSelectByTicket(group.positionTickets[i])) {
+    SortablePosition positionsToSort[];
+    ArrayResize(positionsToSort, ticketCount);
+    for (int i = 0; i < ticketCount; i++)
+    {
+        if (PositionSelectByTicket(group.positionTickets[i]))
+        {
             positionsToSort[i].ticket = group.positionTickets[i];
             positionsToSort[i].openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
         }
     }
-    if (InpExitLogic != EXIT_FIFO) {
-        for (int i = 0; i < ticketCount - 1; i++) {
-            for (int j = 0; j < ticketCount - i - 1; j++) {
+    if (InpExitLogic != EXIT_FIFO)
+    {
+        for (int i = 0; i < ticketCount - 1; i++)
+        {
+            for (int j = 0; j < ticketCount - i - 1; j++)
+            {
                 bool shouldSwap = false;
-                if (InpExitLogic == EXIT_UNFAVORABLE) {
+                if (InpExitLogic == EXIT_UNFAVORABLE)
+                {
                     if ((group.isBuy && positionsToSort[j].openPrice > positionsToSort[j+1].openPrice) || (!group.isBuy && positionsToSort[j].openPrice < positionsToSort[j+1].openPrice)) shouldSwap = true;
-                } else {
+                }
+                else
+                {
                     if ((group.isBuy && positionsToSort[j].openPrice < positionsToSort[j+1].openPrice) || (!group.isBuy && positionsToSort[j].openPrice > positionsToSort[j+1].openPrice)) shouldSwap = true;
                 }
-                if (shouldSwap) { SortablePosition temp = positionsToSort[j]; positionsToSort[j] = positionsToSort[j+1]; positionsToSort[j+1] = temp; }
+                if (shouldSwap)
+                {
+                    SortablePosition temp = positionsToSort[j];
+                    positionsToSort[j] = positionsToSort[j+1];
+                    positionsToSort[j+1] = temp;
+                }
             }
         }
     }
-    double remainingLotToClose = lotToClose; bool result = false;
-    for (int i = 0; i < ticketCount; i++) {
+    double remainingLotToClose = lotToClose;
+    bool result = false;
+    for (int i = 0; i < ticketCount; i++)
+    {
         ulong ticket = (InpExitLogic == EXIT_FIFO) ? group.positionTickets[i] : positionsToSort[i].ticket;
         if (!PositionSelectByTicket(ticket)) continue;
         double posVolume = PositionGetDouble(POSITION_VOLUME);
         if(posVolume <= 0) continue;
-        MqlTradeRequest request; MqlTradeResult tradeResult;
-        request.action = TRADE_ACTION_DEAL; request.position = ticket; request.symbol = _Symbol;
+        MqlTradeRequest request;
+        MqlTradeResult tradeResult;
+        ZeroMemory(request);
+        ZeroMemory(tradeResult);
+        request.action = TRADE_ACTION_DEAL;
+        request.position = ticket;
+        request.symbol = _Symbol;
         request.type = group.isBuy ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
         request.price = group.isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
         request.type_filling = ORDER_FILLING_IOC;
-        if (remainingLotToClose >= posVolume) {
+        request.sl = 0.0;
+        request.tp = 0.0;
+        if (remainingLotToClose >= posVolume)
+        {
             request.volume = posVolume;
-            if(OrderSend(request, tradeResult)) { remainingLotToClose -= posVolume; result = true; }
-        } else {
-            if (remainingLotToClose > 0) {
+            if(OrderSend(request, tradeResult))
+            {
+                remainingLotToClose -= posVolume;
+                result = true;
+            }
+        }
+        else
+        {
+            if (remainingLotToClose > 0)
+            {
                 request.volume = remainingLotToClose;
-                if(OrderSend(request, tradeResult)) { remainingLotToClose = 0; result = true; }
+                if(OrderSend(request, tradeResult))
+                {
+                    remainingLotToClose = 0;
+                    result = true;
+                }
             }
         }
         if (remainingLotToClose < SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN)) break;
@@ -716,12 +930,17 @@ bool ExecuteGroupSplitExit(PositionGroup &group, double lotToClose)
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
-    for(int i = 0; i < ArraySize(allLines); i++) { CheckLineSignals(allLines[i]); }
-    MqlRates rates[]; ArraySetAsSeries(rates, true);
+    for(int i = 0; i < ArraySize(allLines); i++)
+    {
+        CheckLineSignals(allLines[i]);
+    }
+    MqlRates rates[];
+    ArraySetAsSeries(rates, true);
     if(CopyRates(_Symbol, PERIOD_M5, 0, 1, rates) < 1) return;
     datetime currentTime = rates[0].time;
     bool hasBuySignal = false, hasSellSignal = false;
-    for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--) {
+    for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--)
+    {
         string name = ObjectName(0, i, -1, OBJ_ARROW);
         if(StringFind(name, InpArrowPrefix) != 0) continue;
         datetime objTime = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME);
@@ -729,26 +948,43 @@ void CheckEntry()
         if(StringFind(name, "_Buy") > 0) hasBuySignal = true;
         if(StringFind(name, "_Sell") > 0) hasSellSignal = true;
     }
-    if((hasBuySignal || hasSellSignal) && (TimeCurrent() > lastTradeTime + 5)) {
-        if(InpEnableTimeFilter) {
-            MqlDateTime time; TimeCurrent(time); int h = time.hour; bool outside = false;
-            if(InpTradingHourStart > InpTradingHourEnd) { if(h < InpTradingHourStart && h >= InpTradingHourEnd) outside = true; }
-            else { if(h < InpTradingHourStart || h >= InpTradingHourEnd) outside = true; }
+    if((hasBuySignal || hasSellSignal) && (TimeCurrent() > lastTradeTime + 5))
+    {
+        if(InpEnableTimeFilter)
+        {
+            MqlDateTime time;
+            TimeCurrent(time);
+            int h = time.hour;
+            bool outside = false;
+            if(InpTradingHourStart > InpTradingHourEnd)
+            {
+                if(h < InpTradingHourStart && h >= InpTradingHourEnd) outside = true;
+            }
+            else
+            {
+                if(h < InpTradingHourStart || h >= InpTradingHourEnd) outside = true;
+            }
             if(outside) return;
         }
-        if(InpEnableVolatilityFilter) {
+        if(InpEnableVolatilityFilter)
+        {
             double atr_buffer[100];
-            if(CopyBuffer(h_atr, 0, 0, 100, atr_buffer) == 100) {
-                double avg_atr = 0; for(int j = 0; j < 100; j++) avg_atr += atr_buffer[j];
+            if(CopyBuffer(h_atr, 0, 0, 100, atr_buffer) == 100)
+            {
+                double avg_atr = 0;
+                for(int j = 0; j < 100; j++) avg_atr += atr_buffer[j];
                 if(atr_buffer[0] > (avg_atr / 100) * InpAtrMaxRatio) return;
             }
         }
-        MqlTick tick; if(!SymbolInfoTick(_Symbol, tick)) return;
-        if(hasBuySignal && buyGroup.positionCount < InpMaxPositions) {
+        MqlTick tick;
+        if(!SymbolInfoTick(_Symbol, tick)) return;
+        if(hasBuySignal && buyGroup.positionCount < InpMaxPositions)
+        {
             ScoreComponentInfo info = CalculateMACDScore(true);
             if(info.total_score >= InpScore_Standard) PlaceOrder(true, tick.ask, info.total_score);
         }
-        if(hasSellSignal && sellGroup.positionCount < InpMaxPositions) {
+        if(hasSellSignal && sellGroup.positionCount < InpMaxPositions)
+        {
             ScoreComponentInfo info = CalculateMACDScore(false);
             if(info.total_score >= InpScore_Standard) PlaceOrder(false, tick.bid, info.total_score);
         }
@@ -756,16 +992,13 @@ void CheckEntry()
 }
 
 //+------------------------------------------------------------------+
-//| 注文を発注する (修正版)
+//| 注文を発注する                                                   |
 //+------------------------------------------------------------------+
 void PlaceOrder(bool isBuy, double price, int score)
 {
     MqlTradeRequest req;
     MqlTradeResult res;
-
-    // 構造体をゼロで初期化し、予期せぬ値が入るのを防ぐ
     ZeroMemory(req);
-
     req.action = TRADE_ACTION_DEAL;
     req.symbol = _Symbol;
     req.volume = InpLotSize;
@@ -773,10 +1006,7 @@ void PlaceOrder(bool isBuy, double price, int score)
     req.price = NormalizeDouble(price, _Digits);
     req.magic = InpMagicNumber;
     req.comment = (isBuy ? "Buy" : "Sell") + " (Score " + (string)score + ")";
-    
-    // 決済の執行方法を明示的に指定 (他の決済ロジックと合わせる)
     req.type_filling = ORDER_FILLING_IOC;
-
     if(!OrderSend(req, res))
     {
         Print("OrderSend error ", GetLastError());
@@ -801,36 +1031,27 @@ void PlaceOrder(bool isBuy, double price, int score)
 }
 
 //+------------------------------------------------------------------+
-//| ラインごとのシグナル検知を行う関数 (再修正版)
+//| ラインに対するシグナルを検出する                                 |
 //+------------------------------------------------------------------+
 void CheckLineSignals(Line &line)
 {
     MqlRates rates[];
     ArraySetAsSeries(rates, true);
     if(CopyRates(_Symbol, PERIOD_M5, 0, 2, rates) < 2) return;
-
-    datetime currentTime = rates[0].time;
-    datetime prevBarTime = rates[1].time;
-    double offset = InpSignalOffsetPips * g_pip;
-
-    // --- ブレイク状態のリセットロジック ---
-    // レジスタンスラインが上抜け(isBrokeUp=true)した後、価格がラインより下に戻ったらリセット
     if(line.isBrokeUp && rates[0].close < line.price)
     {
         line.isBrokeUp = false;
     }
-    // サポートラインが下抜け(isBrokeDown=true)した後、価格がラインより上に戻ったらリセット
     if(line.isBrokeDown && rates[0].close > line.price)
     {
         line.isBrokeDown = false;
     }
-    // ------
-
+    datetime currentTime = rates[0].time, prevBarTime = rates[1].time;
+    double offset = InpSignalOffsetPips * g_pip;
     if(InpEntryMode == TOUCH_MODE)
     {
         if(line.type == LINE_TYPE_RESISTANCE)
         {
-            // --- タッチブレイク (買い) ---
             if(!line.isBrokeUp && rates[1].open < line.price && rates[1].close >= line.price)
             {
                 if(!InpAllowOuterTouch)
@@ -839,16 +1060,13 @@ void CheckLineSignals(Line &line)
                 }
                 line.isBrokeUp = true;
             }
-
-            // --- タッチリバウンド (売り) ---
             if(!line.isBrokeUp && rates[1].open <= line.price && rates[1].high >= line.price && rates[1].close <= line.price && rates[1].low < line.price)
             {
                 CreateSignalObject(InpDotPrefix + "TouchRebound_Sell_" + line.name, prevBarTime, line.price + offset, line.signalColor, InpTouchReboundDownCode, line.name + " タッチ反発(売り)");
             }
         }
-        else // LINE_TYPE_SUPPORT
+        else
         {
-            // --- タッチブレイク (売り) ---
             if(!line.isBrokeDown && rates[1].open > line.price && rates[1].close <= line.price)
             {
                 if(!InpAllowOuterTouch)
@@ -857,17 +1075,61 @@ void CheckLineSignals(Line &line)
                 }
                 line.isBrokeDown = true;
             }
-
-            // --- タッチリバウンド (買い) ---
             if(!line.isBrokeDown && rates[1].open >= line.price && rates[1].low <= line.price && rates[1].close >= line.price && rates[1].high > line.price)
             {
                 CreateSignalObject(InpDotPrefix + "TouchRebound_Buy_" + line.name, prevBarTime, line.price - offset, line.signalColor, InpTouchReboundUpCode, line.name + " タッチ反発(買い)");
             }
         }
     }
-    else if(InpEntryMode == ZONE_MODE) // ZONE_MODEは変更なし
+    else if(InpEntryMode == ZONE_MODE)
     {
-        // ... (ZONE_MODEのロジックは変更ありません) ...
+        double zone_lower = line.price - InpZonePips * g_pip, zone_upper = line.price + InpZonePips * g_pip;
+        if(line.type == LINE_TYPE_RESISTANCE)
+        {
+            if(rates[0].close >= line.price && rates[0].close < zone_upper) line.isInZone = true;
+            else if(rates[0].close >= zone_upper || rates[0].close < line.price) line.isInZone = false;
+            if(line.isInZone && rates[1].close > line.price && rates[0].close <= line.price)
+            {
+                CreateSignalObject(InpDotPrefix+"ZoneRebound_Sell_"+line.name,currentTime,line.price+offset,line.signalColor,InpZoneReboundSellCode, line.name + " ゾーン内反発(売り)");
+                line.isInZone=false;
+            }
+            if(rates[1].close > line.price && rates[0].close <= line.price)
+            {
+                CreateSignalObject(InpDotPrefix+"VReversal_Sell_"+line.name,currentTime,line.price+offset,line.signalColor,InpVReversalSellCode, line.name + " V字回復(売り)");
+            }
+            if(InpBreakMode)
+            {
+                if(rates[0].close > zone_upper) line.waitForRetest = true;
+                if(line.waitForRetest && rates[0].high >= line.price && rates[0].close < line.price)
+                {
+                    CreateSignalObject(InpArrowPrefix+"Retest_Sell_"+line.name,currentTime,line.price+offset,line.signalColor,InpRetestSellCode, line.name + " B&R(売り)");
+                    line.waitForRetest=false;
+                }
+            }
+        }
+        else
+        {
+            if(rates[0].close <= line.price && rates[0].close > zone_lower) line.isInZone = true;
+            else if(rates[0].close <= zone_lower || rates[0].close > line.price) line.isInZone = false;
+            if(line.isInZone && rates[1].close < line.price && rates[0].close >= line.price)
+            {
+                CreateSignalObject(InpDotPrefix+"ZoneRebound_Buy_"+line.name,currentTime,line.price-offset,line.signalColor,InpZoneReboundBuyCode, line.name + " ゾーン内反発(買い)");
+                line.isInZone=false;
+            }
+            if(rates[1].close < line.price && rates[0].close >= line.price)
+            {
+                CreateSignalObject(InpDotPrefix+"VReversal_Buy_"+line.name,currentTime,line.price-offset,line.signalColor,InpVReversalBuyCode, line.name + " V字回復(買い)");
+            }
+            if(InpBreakMode)
+            {
+                if(rates[0].close < zone_lower) line.waitForRetest = true;
+                if(line.waitForRetest && rates[0].low <= line.price && rates[0].close > line.price)
+                {
+                    CreateSignalObject(InpArrowPrefix+"Retest_Buy_"+line.name,currentTime,line.price-offset,line.signalColor,InpRetestBuyCode, line.name + " B&R(買い)");
+                    line.waitForRetest=false;
+                }
+            }
+        }
     }
 }
 
@@ -884,24 +1146,38 @@ void UpdateLines()
         ENUM_LINE_TYPE p_types[] = {LINE_TYPE_SUPPORT, LINE_TYPE_RESISTANCE, LINE_TYPE_SUPPORT, LINE_TYPE_RESISTANCE, LINE_TYPE_SUPPORT, LINE_TYPE_RESISTANCE};
         color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
         string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
-        for(int i = 0; i < 6; i++) {
-            if(i >= 2 && !InpShowS2R2) continue; if(i >= 4 && !InpShowS3R3) continue;
-            Line line; line.name = p_names[i]; line.price = p_prices[i]; line.type = p_types[i]; line.signalColor = p_colors[i];
-            int size = ArraySize(allLines); ArrayResize(allLines, size + 1); allLines[size] = line;
+        for(int i = 0; i < 6; i++)
+        {
+            if(i >= 2 && !InpShowS2R2) continue;
+            if(i >= 4 && !InpShowS3R3) continue;
+            Line line;
+            line.name = p_names[i];
+            line.price = p_prices[i];
+            line.type = p_types[i];
+            line.signalColor = p_colors[i];
+            int size = ArraySize(allLines);
+            ArrayResize(allLines, size + 1);
+            allLines[size] = line;
         }
     }
     DrawPivotLine();
-    MqlTick tick; if(SymbolInfoTick(_Symbol, tick)) {
-        for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--) {
+    MqlTick tick;
+    if(SymbolInfoTick(_Symbol, tick))
+    {
+        for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--)
+        {
             string objName = ObjectName(0, i, -1, OBJ_TREND);
             if(StringFind(objName, "ManualTrend_") != 0) continue;
             string obj_text = ObjectGetString(0, objName, OBJPROP_TEXT);
             if(StringFind(obj_text, "-Broken") >= 0) continue;
-            Line m_line; m_line.name = "Manual_" + StringSubstr(objName, StringFind(objName, "_", 0) + 1);
+            Line m_line;
+            m_line.name = "Manual_" + StringSubstr(objName, StringFind(objName, "_", 0) + 1);
             m_line.price = ObjectGetDouble(0, objName, OBJPROP_PRICE, 0);
             m_line.signalColor = (color)ObjectGetInteger(0, objName, OBJPROP_COLOR);
             m_line.type = (m_line.price > tick.ask) ? LINE_TYPE_RESISTANCE : LINE_TYPE_SUPPORT;
-            int size = ArraySize(allLines); ArrayResize(allLines, size + 1); allLines[size] = m_line;
+            int size = ArraySize(allLines);
+            ArrayResize(allLines, size + 1);
+            allLines[size] = m_line;
         }
     }
 }
@@ -911,11 +1187,24 @@ void UpdateLines()
 //+------------------------------------------------------------------+
 void CalculatePivot()
 {
-    MqlRates rates[]; if(CopyRates(_Symbol, InpPivotPeriod, 1, 1, rates) < 1) return;
-    double h = rates[0].high; double l = rates[0].low; double c = rates[0].close;
-    pivot = (h + l + c) / 3.0; s1 = 2.0 * pivot - h; r1 = 2.0 * pivot - l;
-    if(InpShowS2R2) { s2 = s1 - (r1 - s1); r2 = r1 + (r1 - s1); }
-    if(InpShowS3R3) { s3 = s2 - (r2 - s2); r3 = r2 + (r2 - s2); }
+    MqlRates rates[];
+    if(CopyRates(_Symbol, InpPivotPeriod, 1, 1, rates) < 1) return;
+    double h = rates[0].high;
+    double l = rates[0].low;
+    double c = rates[0].close;
+    pivot = (h + l + c) / 3.0;
+    s1 = 2.0 * pivot - h;
+    r1 = 2.0 * pivot - l;
+    if(InpShowS2R2)
+    {
+        s2 = s1 - (r1 - s1);
+        r2 = r1 + (r1 - s1);
+    }
+    if(InpShowS3R3)
+    {
+        s3 = s2 - (r2 - s2);
+        r3 = r2 + (r2 - s2);
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -936,15 +1225,21 @@ void DrawPivotLine()
             }
         }
     }
-    string ts = TimeToString(new_start_time, TIME_DATE|TIME_MINUTES); StringReplace(ts, ":", "_"); StringReplace(ts, ".", "_");
+    string ts = TimeToString(new_start_time, TIME_DATE|TIME_MINUTES);
+    StringReplace(ts, ":", "_");
+    StringReplace(ts, ".", "_");
     double p_prices[] = {s1, r1, s2, r2, s3, r3};
     color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
     string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
-    for(int i=0; i<6; i++) {
-        if(i >= 2 && !InpShowS2R2) continue; if(i >= 4 && !InpShowS3R3) continue;
+    for(int i=0; i<6; i++)
+    {
+        if(i >= 2 && !InpShowS2R2) continue;
+        if(i >= 4 && !InpShowS3R3) continue;
         string name = InpLinePrefix_Pivot + p_names[i] + "_" + ts;
-        if(ObjectFind(0, name) < 0) {
-            if(ObjectCreate(0, name, OBJ_TREND, 0, new_start_time, p_prices[i], new_start_time + PeriodSeconds(InpPivotPeriod), p_prices[i])) {
+        if(ObjectFind(0, name) < 0)
+        {
+            if(ObjectCreate(0, name, OBJ_TREND, 0, new_start_time, p_prices[i], new_start_time + PeriodSeconds(InpPivotPeriod), p_prices[i]))
+            {
                 ObjectSetInteger(0, name, OBJPROP_COLOR, p_colors[i]);
                 ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
                 ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
@@ -956,13 +1251,21 @@ void DrawPivotLine()
 //+------------------------------------------------------------------+
 //| 個別モード：新規ポジションを検出し、管理対象に追加する           |
 //+------------------------------------------------------------------+
-void DetectNewEntrances() {
-    for(int i = PositionsTotal() - 1; i >= 0; i--) {
+void DetectNewEntrances()
+{
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
         ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber) {
+        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+        {
             bool exists = false;
-            for(int j = 0; j < ArraySize(splitPositions); j++) {
-                if(splitPositions[j].ticket == ticket) { exists = true; break; }
+            for(int j = 0; j < ArraySize(splitPositions); j++)
+            {
+                if(splitPositions[j].ticket == ticket)
+                {
+                    exists = true;
+                    break;
+                }
             }
             if(!exists) AddSplitData(ticket);
         }
@@ -972,31 +1275,56 @@ void DetectNewEntrances() {
 //+------------------------------------------------------------------+
 //| 個別モード：ポジションの決済をチェックする                       |
 //+------------------------------------------------------------------+
-void CheckExits() {
+void CheckExits()
+{
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID), ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    for(int i = ArraySize(splitPositions) - 1; i >= 0; i--) {
-        if(!PositionSelectByTicket(splitPositions[i].ticket)) {
+    double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    for(int i = ArraySize(splitPositions) - 1; i >= 0; i--)
+    {
+        if(!PositionSelectByTicket(splitPositions[i].ticket))
+        {
             for(int j=0; j<ArraySize(splitPositions[i].splitLineNames); j++) ObjectDelete(0, splitPositions[i].splitLineNames[j]);
-            ArrayRemove(splitPositions, i, 1); continue;
+            ArrayRemove(splitPositions, i, 1);
+            continue;
         }
-        if(splitPositions[i].splitsDone >= InpSplitCount || InpSplitCount <= 0) continue;
+        int effectiveSplitCount = ArraySize(splitPositions[i].splitPrices);
+        if(splitPositions[i].splitsDone >= effectiveSplitCount || effectiveSplitCount <= 0) continue;
         double currentPrice = splitPositions[i].isBuy ? bid : ask;
         double nextSplitPrice = splitPositions[i].splitPrices[splitPositions[i].splitsDone];
         if (nextSplitPrice <= 0) continue;
         double priceBuffer = InpExitBufferPips * g_pip;
-        bool splitPriceReached = (splitPositions[i].isBuy && currentPrice >= (nextSplitPrice-priceBuffer)) || (!splitPositions[i].isBuy && currentPrice <= (nextSplitPrice+priceBuffer));
-        if(splitPriceReached && splitPositions[i].splitLineTimes[splitPositions[i].splitsDone] == 0) {
+        bool splitPriceReached = (splitPositions[i].isBuy && currentPrice >= (nextSplitPrice - priceBuffer)) ||
+                                 (!splitPositions[i].isBuy && currentPrice <= (nextSplitPrice + priceBuffer));
+        if(splitPriceReached && splitPositions[i].splitLineTimes[splitPositions[i].splitsDone] == 0)
+        {
+            double lotToClose = 0.0;
             double remainingLot = NormalizeDouble(PositionGetDouble(POSITION_VOLUME), 2);
             if (remainingLot < minLot) continue;
-            if (splitPositions[i].splitsDone == InpSplitCount - 1) ClosePosition(splitPositions[i].ticket);
-            else {
-                double splitLot = NormalizeDouble(splitPositions[i].lotSize / InpSplitCount, 2);
-                if(splitLot < minLot) splitLot = minLot;
-                if(splitLot > remainingLot) splitLot = remainingLot;
-                if(ExecuteSplitExit(splitPositions[i].ticket, splitLot, splitPositions[i], splitPositions[i].splitsDone)) {
-                    splitPositions[i].splitsDone++;
-                    if(InpBreakEvenAfterSplits > 0 && splitPositions[i].splitsDone == InpBreakEvenAfterSplits) SetBreakEven(splitPositions[i].ticket, splitPositions[i].entryPrice);
+            if (splitPositions[i].splitsDone == effectiveSplitCount - 1)
+            {
+                lotToClose = remainingLot;
+            }
+            else
+            {
+                double baseLot = floor(splitPositions[i].lotSize / effectiveSplitCount / volStep) * volStep;
+                double remainderLot = NormalizeDouble(splitPositions[i].lotSize - (baseLot * effectiveSplitCount), 2);
+                int upgradeCount = (int)round(remainderLot / volStep);
+                lotToClose = baseLot;
+                if(splitPositions[i].splitsDone < upgradeCount)
+                {
+                    lotToClose += volStep;
+                }
+                if(lotToClose < minLot) lotToClose = minLot;
+                if(lotToClose > remainingLot) lotToClose = remainingLot;
+            }
+            lotToClose = NormalizeDouble(lotToClose, 2);
+            if(lotToClose > 0 && ExecuteSplitExit(splitPositions[i].ticket, lotToClose, splitPositions[i], splitPositions[i].splitsDone))
+            {
+                splitPositions[i].splitsDone++;
+                if(InpBreakEvenAfterSplits > 0 && splitPositions[i].splitsDone >= InpBreakEvenAfterSplits)
+                {
+                    SetBreakEven(splitPositions[i].ticket, splitPositions[i].entryPrice);
                 }
             }
         }
@@ -1004,12 +1332,11 @@ void CheckExits() {
 }
 
 //+------------------------------------------------------------------+
-//| 個別モード：新規ポジションの分割決済データを準備する (修正版)
+//| 個別モード：新規ポジションの分割決済データを準備する             |
 //+------------------------------------------------------------------+
 void AddSplitData(ulong ticket)
 {
     if(!PositionSelectByTicket(ticket)) return;
-
     SplitData newSplit;
     newSplit.ticket = ticket;
     newSplit.entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1018,7 +1345,6 @@ void AddSplitData(ulong ticket)
     newSplit.splitsDone = 0;
     newSplit.openTime = (datetime)PositionGetInteger(POSITION_TIME);
     newSplit.score = 0;
-
     for(int i = 0; i < ArraySize(g_managedPositions); i++)
     {
         if(g_managedPositions[i].ticket == ticket)
@@ -1027,36 +1353,26 @@ void AddSplitData(ulong ticket)
             break;
         }
     }
-
     newSplit.stampedFinalTP = newSplit.isBuy ? zonalFinalTPLine_Buy : zonalFinalTPLine_Sell;
     double tpPrice = newSplit.stampedFinalTP;
-
-    if(tpPrice <= 0 || tpPrice == DBL_MAX)
-        tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1000 : -1000) * g_pip;
-
+    if(tpPrice <= 0 || tpPrice == DBL_MAX) tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1000 : -1000) * g_pip;
     if(newSplit.score >= InpScore_High && tpPrice > 0)
     {
         double originalDiff = MathAbs(tpPrice - newSplit.entryPrice);
         tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1 : -1) * (originalDiff * InpHighSchoreTpRratio);
     }
-    newSplit.stampedFinalTP = tpPrice; // 更新したTPを記録
-
+    newSplit.stampedFinalTP = tpPrice;
     double priceDiff = MathAbs(tpPrice - newSplit.entryPrice);
-    
-    // --- ★スコアに応じた分割回数の動的変更 ---
     int dynamicSplitCount = InpSplitCount;
     if(InpEnableDynamicSplits && newSplit.score >= InpScore_High)
     {
         dynamicSplitCount += InpHighScoreSplit_Add;
     }
-    // ------
-
     if(dynamicSplitCount > 0)
     {
         ArrayResize(newSplit.splitPrices, dynamicSplitCount);
         ArrayResize(newSplit.splitLineNames, dynamicSplitCount);
         ArrayResize(newSplit.splitLineTimes, dynamicSplitCount);
-
         double step = priceDiff / dynamicSplitCount;
         for(int i = 0; i < dynamicSplitCount; i++)
         {
@@ -1064,13 +1380,11 @@ void AddSplitData(ulong ticket)
             string lineName = "SplitLine_" + (string)ticket + "_" + (string)i;
             newSplit.splitLineNames[i] = lineName;
             newSplit.splitLineTimes[i] = 0;
-            
             ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, newSplit.splitPrices[i]);
             ObjectSetInteger(0, lineName, OBJPROP_COLOR, newSplit.isBuy ? clrGoldenrod : clrPurple);
             ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
         }
     }
-
     int size = ArraySize(splitPositions);
     ArrayResize(splitPositions, size + 1);
     splitPositions[size] = newSplit;
@@ -1079,14 +1393,27 @@ void AddSplitData(ulong ticket)
 //+------------------------------------------------------------------+
 //| 個別モード：分割決済を実行する                                   |
 //+------------------------------------------------------------------+
-bool ExecuteSplitExit(ulong ticket, double lot, SplitData &split, int splitIndex) {
-    MqlTradeRequest request; MqlTradeResult result;
+bool ExecuteSplitExit(ulong ticket, double lot, SplitData &split, int splitIndex)
+{
+    MqlTradeRequest request;
+    MqlTradeResult result;
     if(!PositionSelectByTicket(ticket)) return false;
-    request.action = TRADE_ACTION_DEAL; request.position = ticket; request.symbol = _Symbol;
-    request.volume = lot; request.type = split.isBuy ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
+    ZeroMemory(request);
+    ZeroMemory(result);
+    request.action = TRADE_ACTION_DEAL;
+    request.position = ticket;
+    request.symbol = _Symbol;
+    request.volume = lot;
+    request.type = split.isBuy ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
     request.price = split.isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     request.type_filling = ORDER_FILLING_IOC;
-    if(!OrderSend(request, result)) { PrintFormat("ExecuteSplitExit 失敗: %d", GetLastError()); return false; }
+    request.sl = 0.0;
+    request.tp = 0.0;
+    if(!OrderSend(request, result))
+    {
+        PrintFormat("ExecuteSplitExit 失敗: %d", GetLastError());
+        return false;
+    }
     split.splitLineTimes[splitIndex] = TimeCurrent();
     string lineName = split.splitLineNames[splitIndex];
     double splitPrice = split.splitPrices[splitIndex];
@@ -1101,11 +1428,15 @@ bool ExecuteSplitExit(ulong ticket, double lot, SplitData &split, int splitIndex
 //+------------------------------------------------------------------+
 //| 汎用的なボタンを作成する                                         |
 //+------------------------------------------------------------------+
-bool CreateApexButton(string name, int x, int y, int width, int height, string text, color clr) {
+bool CreateApexButton(string name, int x, int y, int width, int height, string text, color clr)
+{
     ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0);
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x); ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
-    ObjectSetInteger(0, name, OBJPROP_XSIZE, width); ObjectSetInteger(0, name, OBJPROP_YSIZE, height);
-    ObjectSetString(0, name, OBJPROP_TEXT, text); ObjectSetInteger(0, name, OBJPROP_BGCOLOR, clr);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+    ObjectSetInteger(0, name, OBJPROP_XSIZE, width);
+    ObjectSetInteger(0, name, OBJPROP_YSIZE, height);
+    ObjectSetString(0, name, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, name, OBJPROP_BGCOLOR, clr);
     ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 8);
     return true;
 }
@@ -1113,27 +1444,44 @@ bool CreateApexButton(string name, int x, int y, int width, int height, string t
 //+------------------------------------------------------------------+
 //| 手動ライン描画ボタンを作成する                                   |
 //+------------------------------------------------------------------+
-void CreateManualLineButton() { CreateApexButton(g_buttonName, 10, 50, 120, 20, "手動ライン描画 OFF", C'220,220,220'); }
+void CreateManualLineButton()
+{
+    CreateApexButton(g_buttonName, 10, 50, 120, 20, "手動ライン描画 OFF", C'220,220,220');
+}
 //+------------------------------------------------------------------+
 //| シグナル消去ボタンを作成する                                     |
 //+------------------------------------------------------------------+
-void CreateClearButton() { CreateApexButton(g_clearButtonName, 10, 75, 120, 20, "シグナル消去", C'255,228,225'); }
+void CreateClearButton()
+{
+    CreateApexButton(g_clearButtonName, 10, 75, 120, 20, "シグナル消去", C'255,228,225');
+}
 //+------------------------------------------------------------------+
 //| 手動ライン消去ボタンを作成する                                   |
 //+------------------------------------------------------------------+
-void CreateClearLinesButton() { CreateApexButton(g_clearLinesButtonName, 10, 100, 120, 20, "手動ライン消去", C'225,240,255'); }
+void CreateClearLinesButton()
+{
+    CreateApexButton(g_clearLinesButtonName, 10, 100, 120, 20, "手動ライン消去", C'225,240,255');
+}
 //+------------------------------------------------------------------+
 //| グループ内の全ポジションを決済する                               |
 //+------------------------------------------------------------------+
-void CloseAllPositionsInGroup(PositionGroup &group) { for(int i = ArraySize(group.positionTickets) - 1; i >= 0; i--) ClosePosition(group.positionTickets[i]); }
+void CloseAllPositionsInGroup(PositionGroup &group)
+{
+    for(int i = ArraySize(group.positionTickets) - 1; i >= 0; i--) ClosePosition(group.positionTickets[i]);
+}
 
 //+------------------------------------------------------------------+
 //| 指定されたチケットのポジションを決済する                         |
 //+------------------------------------------------------------------+
-void ClosePosition(ulong ticket) {
-    MqlTradeRequest req; MqlTradeResult res;
-    if(PositionSelectByTicket(ticket)) {
-        req.action = TRADE_ACTION_DEAL; req.position = ticket; req.symbol = _Symbol;
+void ClosePosition(ulong ticket)
+{
+    MqlTradeRequest req;
+    MqlTradeResult res;
+    if(PositionSelectByTicket(ticket))
+    {
+        req.action = TRADE_ACTION_DEAL;
+        req.position = ticket;
+        req.symbol = _Symbol;
         req.volume = PositionGetDouble(POSITION_VOLUME);
         req.type = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY) ? ORDER_TYPE_SELL : ORDER_TYPE_BUY;
         req.price = (req.type == ORDER_TYPE_SELL) ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
@@ -1142,19 +1490,53 @@ void ClosePosition(ulong ticket) {
 }
 
 //+------------------------------------------------------------------+
-//| グループ全体のSLを平均建値に設定する（ブレークイーブン）         |
+//| グループ全体のSLを平均建値に設定する（ブレークイーブン）           |
 //+------------------------------------------------------------------+
-void SetBreakEvenForGroup(PositionGroup &group) { for(int i = 0; i < ArraySize(group.positionTickets); i++) SetBreakEven(group.positionTickets[i], group.averageEntryPrice); }
+void SetBreakEvenForGroup(PositionGroup &group)
+{
+    for(int i = 0; i < ArraySize(group.positionTickets); i++) SetBreakEven(group.positionTickets[i], group.averageEntryPrice);
+}
 
 //+------------------------------------------------------------------+
 //| 指定されたポジションのSLを設定する                               |
 //+------------------------------------------------------------------+
-bool SetBreakEven(ulong ticket, double entryPrice) {
-    MqlTradeRequest req; MqlTradeResult res;
-    if(PositionSelectByTicket(ticket)) {
-        req.action = TRADE_ACTION_SLTP; req.position = ticket; req.symbol = _Symbol;
-        req.sl = NormalizeDouble(entryPrice, _Digits); req.tp = PositionGetDouble(POSITION_TP);
-        return OrderSend(req, res);
+bool SetBreakEven(ulong ticket, double entryPrice)
+{
+    MqlTradeRequest req;
+    MqlTradeResult res;
+    ZeroMemory(req);
+    if(PositionSelectByTicket(ticket))
+    {
+        double currentSL = PositionGetDouble(POSITION_SL);
+        if(MathAbs(currentSL - entryPrice) < g_pip)
+        {
+            return true;
+        }
+        req.action = TRADE_ACTION_SLTP;
+        req.position = ticket;
+        req.symbol = _Symbol;
+        req.sl = NormalizeDouble(entryPrice, _Digits);
+        req.tp = PositionGetDouble(POSITION_TP);
+        double stops_level = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_pip;
+        double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+        ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        if(pos_type == POSITION_TYPE_BUY && req.sl >= current_bid - stops_level)
+        {
+            PrintFormat("BE設定スキップ(BUY): SL(%f)がストップレベル(%f)の内側です。", req.sl, current_bid - stops_level);
+            return false;
+        }
+        if(pos_type == POSITION_TYPE_SELL && req.sl <= current_ask + stops_level)
+        {
+            PrintFormat("BE設定スキップ(SELL): SL(%f)がストップレベル(%f)の内側です。", req.sl, current_ask + stops_level);
+            return false;
+        }
+        if(!OrderSend(req, res))
+        {
+            PrintFormat("SetBreakEven OrderSend Error: %d", GetLastError());
+            return false;
+        }
+        return true;
     }
     return false;
 }
@@ -1162,17 +1544,20 @@ bool SetBreakEven(ulong ticket, double entryPrice) {
 //+------------------------------------------------------------------+
 //| 手動ラインの状態を監視し、ブレイクを検出する                     |
 //+------------------------------------------------------------------+
-void ManageManualLines() {
+void ManageManualLines()
+{
     MqlRates rates[];
     if(CopyRates(_Symbol, _Period, 0, 2, rates) < 2) return;
-    for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--) {
+    for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--)
+    {
         string name = ObjectName(0, i, -1, OBJ_TREND);
         if(StringFind(name, "ManualTrend_") != 0) continue;
         string text = ObjectGetString(0, name, OBJPROP_TEXT);
         if(StringFind(text, "-Broken") >= 0) continue;
         double price = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
         bool is_broken = (StringFind(text, "Resistance") >= 0 && rates[1].close > price) || (StringFind(text, "Support") >= 0 && rates[1].close < price);
-        if(is_broken) {
+        if(is_broken)
+        {
             ObjectSetInteger(0, name, OBJPROP_TIME, 1, rates[1].time);
             ObjectSetString(0, name, OBJPROP_TEXT, text + "-Broken");
             ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
@@ -1183,13 +1568,19 @@ void ManageManualLines() {
 //+------------------------------------------------------------------+
 //| シグナルオブジェクトをチャートに描画する                         |
 //+------------------------------------------------------------------+
-void CreateSignalObject(string name, datetime dt, double price, color clr, int code, string msg) {
+void CreateSignalObject(string name, datetime dt, double price, color clr, int code, string msg)
+{
     string uname = name + "_" + TimeToString(dt, TIME_MINUTES|TIME_SECONDS);
-    if(ObjectFind(0, uname) < 0 && (TimeCurrent() - lastArrowTime) > 5) {
-        if(ObjectCreate(0, uname, OBJ_ARROW, 0, dt, price)) {
-            ObjectSetInteger(0, uname, OBJPROP_COLOR, clr); ObjectSetInteger(0, uname, OBJPROP_ARROWCODE, code);
-            ObjectSetInteger(0, uname, OBJPROP_WIDTH, InpSignalWidth); ObjectSetString(0, uname, OBJPROP_FONT, "Wingdings");
-            ObjectSetInteger(0, uname, OBJPROP_FONTSIZE, InpSignalFontSize); lastArrowTime = TimeCurrent();
+    if(ObjectFind(0, uname) < 0 && (TimeCurrent() - lastArrowTime) > 5)
+    {
+        if(ObjectCreate(0, uname, OBJ_ARROW, 0, dt, price))
+        {
+            ObjectSetInteger(0, uname, OBJPROP_COLOR, clr);
+            ObjectSetInteger(0, uname, OBJPROP_ARROWCODE, code);
+            ObjectSetInteger(0, uname, OBJPROP_WIDTH, InpSignalWidth);
+            ObjectSetString(0, uname, OBJPROP_FONT, "Wingdings");
+            ObjectSetInteger(0, uname, OBJPROP_FONTSIZE, InpSignalFontSize);
+            lastArrowTime = TimeCurrent();
             if(StringLen(msg) > 0) Print(msg);
         }
     }
@@ -1198,21 +1589,27 @@ void CreateSignalObject(string name, datetime dt, double price, color clr, int c
 //+------------------------------------------------------------------+
 //| ダイバージェンスシグナルをチャートに描画する                     |
 //+------------------------------------------------------------------+
-void DrawDivergenceSignal(datetime time, double price, color clr) {
+void DrawDivergenceSignal(datetime time, double price, color clr)
+{
     if(!InpShowDivergenceSignals) return;
     string name = InpDivSignalPrefix + TimeToString(time, TIME_DATE|TIME_MINUTES);
     if(ObjectFind(0, name) >= 0) return;
-    if(ObjectCreate(0, name, OBJ_ARROW, 0, time, price)) {
-        ObjectSetInteger(0, name, OBJPROP_COLOR, clr); ObjectSetInteger(0, name, OBJPROP_ARROWCODE, InpDivSymbolCode);
-        ObjectSetInteger(0, name, OBJPROP_WIDTH, 1); ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpDivSymbolSize);
+    if(ObjectCreate(0, name, OBJ_ARROW, 0, time, price))
+    {
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+        ObjectSetInteger(0, name, OBJPROP_ARROWCODE, InpDivSymbolCode);
+        ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+        ObjectSetInteger(0, name, OBJPROP_FONTSIZE, InpDivSymbolSize);
     }
 }
 
 //+------------------------------------------------------------------+
 //| 描画されたエントリーシグナルをすべて削除する                     |
 //+------------------------------------------------------------------+
-void ClearSignalObjects() {
-    for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--) {
+void ClearSignalObjects()
+{
+    for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+    {
         string name = ObjectName(0, i, -1, -1);
         if(StringFind(name, InpDotPrefix) == 0 || StringFind(name, InpArrowPrefix) == 0) ObjectDelete(0, name);
     }
@@ -1222,8 +1619,10 @@ void ClearSignalObjects() {
 //+------------------------------------------------------------------+
 //| 手動で描画したラインをすべて削除する                             |
 //+------------------------------------------------------------------+
-void ClearManualLines() {
-    for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--) {
+void ClearManualLines()
+{
+    for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--)
+    {
         string name = ObjectName(0, i, -1, OBJ_TREND);
         if(StringFind(name, "ManualTrend_") == 0) ObjectDelete(0, name);
     }
@@ -1234,15 +1633,21 @@ void ClearManualLines() {
 //+------------------------------------------------------------------+
 //| クリックした位置に手動ラインを描画する                           |
 //+------------------------------------------------------------------+
-void DrawManualTrendLine(double price, datetime time) {
-    MqlTick tick; if(!SymbolInfoTick(_Symbol, tick)) return;
+void DrawManualTrendLine(double price, datetime time)
+{
+    MqlTick tick;
+    if(!SymbolInfoTick(_Symbol, tick)) return;
     color line_color = (price < tick.ask) ? p_ManualSupport_Color : p_ManualResist_Color;
     string role_text = (price < tick.ask) ? "Support" : "Resistance";
     string name = "ManualTrend_" + TimeToString(TimeCurrent(), TIME_SECONDS);
-    if(ObjectCreate(0, name, OBJ_TREND, 0, time, price, time + PeriodSeconds(_Period), price)) {
-        ObjectSetInteger(0, name, OBJPROP_COLOR, line_color); ObjectSetString(0, name, OBJPROP_TEXT, role_text);
-        ObjectSetInteger(0, name, OBJPROP_STYLE, p_ManualLine_Style); ObjectSetInteger(0, name, OBJPROP_WIDTH, p_ManualLine_Width);
-        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true); ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
+    if(ObjectCreate(0, name, OBJ_TREND, 0, time, price, time + PeriodSeconds(_Period), price))
+    {
+        ObjectSetInteger(0, name, OBJPROP_COLOR, line_color);
+        ObjectSetString(0, name, OBJPROP_TEXT, role_text);
+        ObjectSetInteger(0, name, OBJPROP_STYLE, p_ManualLine_Style);
+        ObjectSetInteger(0, name, OBJPROP_WIDTH, p_ManualLine_Width);
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
         UpdateLines();
     }
 }
@@ -1250,11 +1655,15 @@ void DrawManualTrendLine(double price, datetime time) {
 //+------------------------------------------------------------------+
 //| 手動ライン描画ボタンの状態を更新する                             |
 //+------------------------------------------------------------------+
-void UpdateButtonState() {
-    if(g_isDrawingMode) {
+void UpdateButtonState()
+{
+    if(g_isDrawingMode)
+    {
         ObjectSetString(0, g_buttonName, OBJPROP_TEXT, "クリックして描画");
         ObjectSetInteger(0, g_buttonName, OBJPROP_BGCOLOR, clrLightGreen);
-    } else {
+    }
+    else
+    {
         ObjectSetString(0, g_buttonName, OBJPROP_TEXT, "手動ライン描画 OFF");
         ObjectSetInteger(0, g_buttonName, OBJPROP_BGCOLOR, C'220,220,220');
     }
@@ -1264,11 +1673,13 @@ void UpdateButtonState() {
 //+------------------------------------------------------------------+
 //| 新しい足ができたかチェックする                                   |
 //+------------------------------------------------------------------+
-bool IsNewBar(ENUM_TIMEFRAMES timeframe) {
+bool IsNewBar(ENUM_TIMEFRAMES timeframe)
+{
     int index = (timeframe == PERIOD_M5) ? 0 : 1;
     if(timeframe != PERIOD_M5 && timeframe != InpPivotPeriod) return false;
     datetime currentTime = iTime(_Symbol, timeframe, 0);
-    if(currentTime != lastBar[index]) {
+    if(currentTime != lastBar[index])
+    {
         lastBar[index] = currentTime;
         return true;
     }
@@ -1299,48 +1710,35 @@ void ManageInfoPanel()
         ObjectsDeleteAll(0, g_panelPrefix);
         return;
     }
-
     string panel_lines[];
-
     AddPanelLine(panel_lines, "▶ ApexFlowEA");
     AddPanelLine(panel_lines, " Magic: " + (string)InpMagicNumber);
     AddPanelLine(panel_lines, " Spread: " + (string)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) + " points");
-    
     AddPanelLine(panel_lines, "──────────────────────");
-    
-    //--- スコア詳細表示 ---
     ScoreComponentInfo buy_info  = CalculateMACDScore(true);
     ScoreComponentInfo sell_info = CalculateMACDScore(false);
-
     AddPanelLine(panel_lines, "--- Score Details ---");
-    AddPanelLine(panel_lines, "             [ Buy / Sell ]");
-    AddPanelLine(panel_lines, "Divergence:  [ " + (string)(buy_info.divergence ? "✔" : "-") + " / " + (string)(sell_info.divergence ? "✔" : "-") + " ]");
-    
+    AddPanelLine(panel_lines, "              [ Buy / Sell ]");
+    AddPanelLine(panel_lines, "Divergence:   [ " + (string)(buy_info.divergence ? "✔" : "-") + " / " + (string)(sell_info.divergence ? "✔" : "-") + " ]");
     string zero_buy  = (string)(buy_info.mid_zeroline ? "✔" : "-") + "/" + (string)(buy_info.long_zeroline ? "✔" : "-");
     string zero_sell = (string)(sell_info.mid_zeroline ? "✔" : "-") + "/" + (string)(sell_info.long_zeroline ? "✔" : "-");
-    AddPanelLine(panel_lines, "Zero(M/L):   [ " + zero_buy + " / " + zero_sell + " ]");
-    
+    AddPanelLine(panel_lines, "Zero(M/L):    [ " + zero_buy + " / " + zero_sell + " ]");
     string angle_buy = (string)(buy_info.exec_angle ? "✔" : "-") + "/" + (string)(buy_info.mid_angle ? "✔" : "-");
     string angle_sell= (string)(sell_info.exec_angle ? "✔" : "-") + "/" + (string)(sell_info.mid_angle ? "✔" : "-");
-    AddPanelLine(panel_lines, "Angle(E/M):  [ " + angle_buy + " / " + angle_sell + " ]");
-    
+    AddPanelLine(panel_lines, "Angle(E/M):   [ " + angle_buy + " / " + angle_sell + " ]");
     string hist_buy = (string)(buy_info.exec_hist ? "✔" : "-") + "/" + (string)(buy_info.mid_hist_sync ? "✔" : "-");
     string hist_sell= (string)(sell_info.exec_hist ? "✔" : "-") + "/" + (string)(sell_info.mid_hist_sync ? "✔" : "-");
-    AddPanelLine(panel_lines, "Hist(E/M):   [ " + hist_buy + " / " + hist_sell + " ]");
-
+    AddPanelLine(panel_lines, "Hist(E/M):    [ " + hist_buy + " / " + hist_sell + " ]");
     AddPanelLine(panel_lines, "──────────────────────");
     AddPanelLine(panel_lines, "Forecast: Buy " + (string)buy_info.total_score + " / Sell " + (string)sell_info.total_score);
-    
     AddPanelLine(panel_lines, "──────────────────────");
     AddPanelLine(panel_lines, "Buy Group: " + (string)buyGroup.positionCount + " pos, " + DoubleToString(buyGroup.totalLotSize, 2) + " lots");
     AddPanelLine(panel_lines, "Sell Group: " + (string)sellGroup.positionCount + " pos, " + DoubleToString(sellGroup.totalLotSize, 2) + " lots");
-
     int line_height = 12;
     for(int i = 0; i < ArraySize(panel_lines); i++)
     {
         string obj_name = g_panelPrefix + (string)i;
         int    y_pos    = p_panel_y_offset + (i * line_height);
-
         if(ObjectFind(0, obj_name) < 0)
         {
             ObjectCreate(0, obj_name, OBJ_LABEL, 0, 0, 0);
@@ -1383,14 +1781,14 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
     double exec_main[], exec_signal[];
     double mid_main[], mid_signal[];
     double long_main[];
-    ArraySetAsSeries(exec_main, true); ArraySetAsSeries(exec_signal, true);
-    ArraySetAsSeries(mid_main, true); ArraySetAsSeries(mid_signal, true);
+    ArraySetAsSeries(exec_main, true);
+    ArraySetAsSeries(exec_signal, true);
+    ArraySetAsSeries(mid_main, true);
+    ArraySetAsSeries(mid_signal, true);
     ArraySetAsSeries(long_main, true);
-
     if(CopyBuffer(h_macd_exec, 0, 0, 30, exec_main) < 30 || CopyBuffer(h_macd_exec, 1, 0, 30, exec_signal) < 30) return info;
     if(CopyBuffer(h_macd_mid, 0, 0, 4, mid_main) < 4 || CopyBuffer(h_macd_mid, 1, 0, 1, mid_signal) < 1) return info;
     if(CopyBuffer(h_macd_long, 0, 0, 1, long_main) < 1) return info;
-
     if(is_buy_signal)
     {
         if(CheckMACDDivergence(true, h_macd_exec)) info.divergence = true;
@@ -1402,7 +1800,7 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
         if(h0 > h1 && h1 > 0 && h2 > 0) info.exec_hist = true;
         if(mid_main[0] - mid_signal[0] > 0) info.mid_hist_sync = true;
     }
-    else // is_sell_signal
+    else
     {
         if(CheckMACDDivergence(false, h_macd_exec)) info.divergence = true;
         if(mid_main[0] < 0)  info.mid_zeroline = true;
@@ -1413,7 +1811,6 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
         if(h0 < h1 && h1 < 0 && h2 < 0) info.exec_hist = true;
         if(mid_main[0] - mid_signal[0] < 0) info.mid_hist_sync = true;
     }
-    
     if(info.divergence)   info.total_score += 3;
     if(info.mid_zeroline)  info.total_score += 2;
     if(info.long_zeroline) info.total_score += 3;
@@ -1421,7 +1818,6 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
     if(info.mid_angle)     info.total_score += 2;
     if(info.exec_hist)     info.total_score += 1;
     if(info.mid_hist_sync) info.total_score += 1;
-
     return info;
 }
 
@@ -1435,23 +1831,27 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
     ArraySetAsSeries(rates, true);
     ArraySetAsSeries(macd_main, true);
     int check_bars = 30;
-
     if(CopyRates(_Symbol, InpMACD_TF_Exec, 0, check_bars, rates) < check_bars) return false;
     if(CopyBuffer(macd_handle, 0, 0, check_bars, macd_main) < check_bars) return false;
-
     int p1_idx = -1, p2_idx = -1;
-
-    if(is_buy_signal) // 強気のダイバージェンス（買い）を探す
+    if(is_buy_signal)
     {
         for(int i = 1; i < check_bars - 1; i++)
         {
             if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low)
             {
-                if(p1_idx == -1) { p1_idx = i; }
-                else { p2_idx = p1_idx; p1_idx = i; break; }
+                if(p1_idx == -1)
+                {
+                    p1_idx = i;
+                }
+                else
+                {
+                    p2_idx = p1_idx;
+                    p1_idx = i;
+                    break;
+                }
             }
         }
-        
         if(p1_idx > 0 && p2_idx > 0)
         {
             if(rates[p1_idx].low < rates[p2_idx].low && macd_main[p1_idx] > macd_main[p2_idx])
@@ -1462,17 +1862,24 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
             }
         }
     }
-    else // 弱気のダイバージェンス（売り）を探す
+    else
     {
         for(int i = 1; i < check_bars - 1; i++)
         {
             if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high)
             {
-                if(p1_idx == -1) { p1_idx = i; }
-                else { p2_idx = p1_idx; p1_idx = i; break; }
+                if(p1_idx == -1)
+                {
+                    p1_idx = i;
+                }
+                else
+                {
+                    p2_idx = p1_idx;
+                    p1_idx = i;
+                    break;
+                }
             }
         }
-        
         if(p1_idx > 0 && p2_idx > 0)
         {
             if(rates[p1_idx].high > rates[p2_idx].high && macd_main[p1_idx] < macd_main[p2_idx])
@@ -1483,6 +1890,5 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
             }
         }
     }
-
     return false;
 }

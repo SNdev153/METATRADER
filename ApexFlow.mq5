@@ -1029,26 +1029,53 @@ void CalculatePivot()
 }
 
 //+------------------------------------------------------------------+
-//| ピボットラインをチャート上に描画                             |
+//| ピボットラインをチャート上に描画 (再延長バグ修正版)              |
 //+------------------------------------------------------------------+
 void DrawPivotLine()
 {
-    datetime start = iTime(_Symbol, InpPivotPeriod, 0);
-    string ts = TimeToString(start, TIME_DATE | TIME_MINUTES);
+    // 1. 新しいピボット期間の開始時間を取得
+    datetime new_start_time = iTime(_Symbol, InpPivotPeriod, 0);
+
+    // 2. 既存のピボットラインを検索し、「延長中」の古いラインだけを確定させる
+    for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--)
+    {
+        string name = ObjectName(0, i, -1, OBJ_TREND);
+        if(StringFind(name, "Pivot_") == 0)
+        {
+            // ★★★ このラインがまだ延長中(Ray)かを確認する条件を追加 ★★★
+            if(ObjectGetInteger(0, name, OBJPROP_RAY_RIGHT) == true)
+            {
+                // 延長線をオフにし、終点を現在の期間の開始時間に設定してラインを確定
+                ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+                ObjectSetInteger(0, name, OBJPROP_TIME, 1, new_start_time);
+            }
+        }
+    }
+
+    // 3. 新しいピボットラインを描画
+    string ts = TimeToString(new_start_time, TIME_DATE | TIME_MINUTES);
     StringReplace(ts, ":", "_"); StringReplace(ts, ".", "_");
-    datetime end = start + PeriodSeconds(InpPivotPeriod);
+    
     string names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
     double prices[] = {s1, r1, s2, r2, s3, r3};
     color colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
+
     for(int i = 0; i < 6; i++)
     {
         if(i >= 2 && !InpShowS2R2) continue;
         if(i >= 4 && !InpShowS3R3) continue;
+        
         string name = "Pivot_" + names[i] + "_" + ts;
-        if(ObjectFind(0, name) < 0) {
-            if(ObjectCreate(0, name, OBJ_TREND, 0, start, prices[i], end, prices[i])) {
+        
+        // 同じ名前のオブジェクトがなければ新規作成
+        if(ObjectFind(0, name) < 0)
+        {
+            datetime end_time = new_start_time + PeriodSeconds(InpPivotPeriod);
+            if(ObjectCreate(0, name, OBJ_TREND, 0, new_start_time, prices[i], end_time, prices[i]))
+            {
                 ObjectSetInteger(0, name, OBJPROP_COLOR, colors[i]);
-                ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
+                ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true); // 新しいラインは延長する
+                ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
             }
         }
     }

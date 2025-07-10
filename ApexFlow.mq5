@@ -147,6 +147,14 @@ input bool           InpBreakMode            = true;     // ブレイクモー�
 input double         InpZonePips             = 50.0;     // ゾーン幅 (pips)
 
 input group "=== UI設定 ===";
+enum ENUM_PANEL_CORNER
+{
+    PC_LEFT_UPPER,   // 左上
+    PC_RIGHT_UPPER,  // 右上
+    PC_LEFT_LOWER,   // 左下
+    PC_RIGHT_LOWER   // 右下
+};
+input ENUM_PANEL_CORNER InpPanelCorner = PC_LEFT_UPPER; // パネルの表示コーナー
 input bool           InpShowInfoPanel        = true;     // 情報パネルを表示する
 input int            p_panel_x_offset        = 10;       // パネルX位置
 input int            p_panel_y_offset        = 130;      // パネルY位置
@@ -262,6 +270,7 @@ int          zigzagHandle;
 double       zonalFinalTPLine_Buy, zonalFinalTPLine_Sell;
 bool         isBuyTPManuallyMoved = false, isSellTPManuallyMoved = false;
 datetime     lastTradeTime;
+bool         g_ignoreNextChartClick = false;
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -421,7 +430,7 @@ void OnTick()
 }
 
 //+------------------------------------------------------------------+
-//| チャートイベント処理関数                                         |
+//| チャートイベント処理関数 (最終調整版)
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
@@ -431,67 +440,42 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
         {
             g_isDrawingMode = !g_isDrawingMode;
             UpdateButtonState();
-            return;
-        }
-        if(sparam == g_clearButtonName)
-        {
-            ClearSignalObjects();
-            return;
-        }
-        if(sparam == g_clearLinesButtonName)
-        {
-            ClearManualLines();
-            return;
-        }
-        if(sparam == BUTTON_BUY_CLOSE_ALL)
-        {
-            if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup);
-            return;
-        }
-        if(sparam == BUTTON_SELL_CLOSE_ALL)
-        {
-            if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup);
-            return;
-        }
-        if(sparam == BUTTON_ALL_CLOSE)
-        {
-            if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup);
-            if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup);
-            return;
-        }
-        if(sparam == BUTTON_RESET_BUY_TP)
-        {
-            isBuyTPManuallyMoved = false;
-            UpdateZones();
-            if(buyGroup.isActive)
+            if(g_isDrawingMode)
             {
-                buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
-                UpdateGroupSplitLines(buyGroup);
+                g_ignoreNextChartClick = true;
             }
-            ChartRedraw();
             return;
         }
-        if(sparam == BUTTON_RESET_SELL_TP)
-        {
-            isSellTPManuallyMoved = false;
-            UpdateZones();
-            if(sellGroup.isActive)
-            {
-                sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
-                UpdateGroupSplitLines(sellGroup);
-            }
-            ChartRedraw();
-            return;
-        }
+        if(sparam == g_clearButtonName) { ClearSignalObjects(); return; }
+        if(sparam == g_clearLinesButtonName) { ClearManualLines(); return; }
+        if(sparam == BUTTON_BUY_CLOSE_ALL) { if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup); return; }
+        if(sparam == BUTTON_SELL_CLOSE_ALL) { if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup); return; }
+        if(sparam == BUTTON_ALL_CLOSE) { if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup); if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup); return; }
+        if(sparam == BUTTON_RESET_BUY_TP) { isBuyTPManuallyMoved = false; UpdateZones(); if(buyGroup.isActive) { buyGroup.stampedFinalTP = zonalFinalTPLine_Buy; UpdateGroupSplitLines(buyGroup); } ChartRedraw(); return; }
+        if(sparam == BUTTON_RESET_SELL_TP) { isSellTPManuallyMoved = false; UpdateZones(); if(sellGroup.isActive) { sellGroup.stampedFinalTP = zonalFinalTPLine_Sell; UpdateGroupSplitLines(sellGroup); } ChartRedraw(); return; }
     }
+    
     if(id == CHARTEVENT_CLICK && g_isDrawingMode)
     {
+        if(g_ignoreNextChartClick)
+        {
+            g_ignoreNextChartClick = false;
+            return;
+        }
+
         int sub;
         datetime t;
         double p;
-        if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, sub, t, p) && sub == 0) DrawManualTrendLine(p, t);
+        if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, sub, t, p) && sub == 0)
+        {
+            DrawManualTrendLine(p, t);
+            // ★★★ 修正箇所: 1回描画してもモードを解除しないように変更 ★★★
+            // g_isDrawingMode = false;
+            // UpdateButtonState();
+        }
         return;
     }
+
     if (id == CHARTEVENT_OBJECT_DRAG && (sparam == "TPLine_Buy" || sparam == "TPLine_Sell"))
     {
         double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
@@ -502,11 +486,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                 isBuyTPManuallyMoved = true;
                 zonalFinalTPLine_Buy = newPrice;
                 ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-                if(buyGroup.isActive)
-                {
-                    buyGroup.stampedFinalTP = newPrice;
-                    UpdateGroupSplitLines(buyGroup);
-                }
+                if(buyGroup.isActive) { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); }
             }
         }
         else
@@ -516,11 +496,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
                 isSellTPManuallyMoved = true;
                 zonalFinalTPLine_Sell = newPrice;
                 ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-                if(sellGroup.isActive)
-                {
-                    sellGroup.stampedFinalTP = newPrice;
-                    UpdateGroupSplitLines(sellGroup);
-                }
+                if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup); }
             }
         }
         ChartRedraw();
@@ -1701,7 +1677,7 @@ void SyncManagedPositions()
 }
 
 //+------------------------------------------------------------------+
-//| 情報パネルの管理 (作成と更新)                                    |
+//| 情報パネルの管理 (作成と更新) (最終調整版)
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
@@ -1734,6 +1710,16 @@ void ManageInfoPanel()
     AddPanelLine(panel_lines, "──────────────────────");
     AddPanelLine(panel_lines, "Buy Group: " + (string)buyGroup.positionCount + " pos, " + DoubleToString(buyGroup.totalLotSize, 2) + " lots");
     AddPanelLine(panel_lines, "Sell Group: " + (string)sellGroup.positionCount + " pos, " + DoubleToString(sellGroup.totalLotSize, 2) + " lots");
+    
+    ENUM_BASE_CORNER corner = CORNER_LEFT_UPPER;
+    switch(InpPanelCorner)
+    {
+        case PC_LEFT_UPPER:   corner = CORNER_LEFT_UPPER;   break;
+        case PC_RIGHT_UPPER:  corner = CORNER_RIGHT_UPPER;  break;
+        case PC_LEFT_LOWER:   corner = CORNER_LEFT_LOWER;   break;
+        case PC_RIGHT_LOWER:  corner = CORNER_RIGHT_LOWER;  break;
+    }
+
     int line_height = 12;
     for(int i = 0; i < ArraySize(panel_lines); i++)
     {
@@ -1743,9 +1729,19 @@ void ManageInfoPanel()
         {
             ObjectCreate(0, obj_name, OBJ_LABEL, 0, 0, 0);
             ObjectSetInteger(0, obj_name, OBJPROP_XDISTANCE, p_panel_x_offset);
-            ObjectSetInteger(0, obj_name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+            ObjectSetInteger(0, obj_name, OBJPROP_CORNER, corner);
             ObjectSetString(0, obj_name, OBJPROP_FONT, "Lucida Console");
             ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, 8);
+            
+            // ★★★ ロジック追加: 右側のコーナーが選択されたら、文字を右揃えにする ★★★
+            if(InpPanelCorner == PC_RIGHT_UPPER || InpPanelCorner == PC_RIGHT_LOWER)
+            {
+                ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, ANCHOR_RIGHT);
+            }
+            else
+            {
+                ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, ANCHOR_LEFT);
+            }
         }
         ObjectSetInteger(0, obj_name, OBJPROP_YDISTANCE, y_pos);
         ObjectSetString(0, obj_name, OBJPROP_TEXT, panel_lines[i]);

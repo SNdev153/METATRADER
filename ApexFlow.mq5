@@ -317,9 +317,78 @@ void DeleteGroupSplitLines(PositionGroup &group);
 // ==================================================================
 // --- 主要関数 ---
 // ==================================================================
+//+------------------------------------------------------------------+
+//| 全ての視覚的要素（ライン、パネル等）を更新する統合関数           |
+//+------------------------------------------------------------------+
+void UpdateAllVisuals()
+{
+    // 1. サポート・レジスタンスライン（ピボット等）を更新・再描画
+    UpdateLines();
+    
+    // 2. TPラインを更新・再描画
+    UpdateZones();
+    
+    // 3. ポジショングループを管理し、分割決済ラインを更新・再描画
+    if (InpPositionMode == MODE_AGGREGATE)
+    {
+        ManagePositionGroups();
+    }
+    else
+    {
+        // 個別モードのロジックもここに集約可能だが、現状のOnTickに依存
+    }
+
+    // 4. 情報パネルを更新・再描画
+    ManageInfoPanel();
+    
+    // 5. チャートを強制的に再描画して、すべての変更を即時反映
+    ChartRedraw();
+}
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数                                         |
+//| 【新規】ピボットラインを再描画する堅牢な関数                     |
+//| (古いラインを全て削除し、現在のラインのみを描画する)             |
+//+------------------------------------------------------------------+
+void RedrawPivotLines()
+{
+    // 1. まず、既存のピボットラインをすべて削除してクリーンな状態にする
+    ObjectsDeleteAll(0, InpLinePrefix_Pivot);
+
+    // 2. パラメータで無効化されている場合は、ここで処理を終了
+    if (!InpUsePivotLines)
+    {
+        return;
+    }
+
+    // 3. 最新のピボット値を計算
+    CalculatePivot();
+
+    // 4. シンプルな横線(OBJ_HLINE)として現在のピボットラインを描画
+    double p_prices[] = {s1, r1, s2, r2, s3, r3};
+    color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
+    string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
+
+    for(int i = 0; i < 6; i++)
+    {
+        if (i >= 2 && !InpShowS2R2) continue;
+        if (i >= 4 && !InpShowS3R3) continue;
+        if (p_prices[i] <= 0) continue; // 不正な価格は描画しない
+
+        string name = InpLinePrefix_Pivot + p_names[i];
+
+        if (ObjectCreate(0, name, OBJ_HLINE, 0, 0, p_prices[i]))
+        {
+            ObjectSetInteger(0, name, OBJPROP_COLOR, p_colors[i]);
+            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+            ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false); // 選択不可に
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);       // 背面に表示
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| エキスパート初期化関数 (最終安定版 v2)                           |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -327,16 +396,19 @@ int OnInit()
     lastBar[0] = 0;
     lastBar[1] = 0;
     lastTradeTime = 0;
+
     h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
     h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
     zigzagHandle = iCustom(_Symbol, _Period, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
+
     if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE)
     {
         Print("インジケータハンドルの作成に失敗しました。");
         return(INIT_FAILED);
     }
+
     if (InpPositionMode == MODE_AGGREGATE)
     {
         InitGroup(buyGroup, true);
@@ -346,7 +418,12 @@ int OnInit()
     {
         ArrayResize(splitPositions, 0);
     }
-    UpdateLines();
+
+    // ★★★ 修正箇所 ★★★
+    // パラメータ変更時に手動TPフラグをリセットし、必ずデフォルトTPが描画されるようにする
+    isBuyTPManuallyMoved = false;
+    isSellTPManuallyMoved = false;
+
     if(InpEnableButtons)
     {
         CreateManualLineButton();
@@ -358,78 +435,104 @@ int OnInit()
         CreateApexButton(BUTTON_RESET_BUY_TP, 245, 75, 100, 20, "BUY TPリセット", clrGoldenrod);
         CreateApexButton(BUTTON_RESET_SELL_TP, 245, 100, 100, 20, "SELL TPリセット", clrGoldenrod);
     }
+
     ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
-    Print("ApexFlowEA v4.0 初期化完了");
+
+    // === 初期描画処理 ===
+    SyncManagedPositions();
+    UpdateLines();
+    RedrawPivotLines();
+    UpdateZones();
+    if (InpPositionMode == MODE_AGGREGATE)
+    {
+        ManagePositionGroups();
+    }
+    ManageInfoPanel();
+
+    ChartRedraw();
+    
+    Print("ApexFlowEA v4.0 初期化完了 (最終安定版 v2)");
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート終了処理関数 (修正版)
+//| EAが作成した全てのチャートオブジェクトを削除するヘルパー関数     |
 //+------------------------------------------------------------------+
-void OnDeinit(const int reason)
+void DeleteAllEaObjects()
 {
-    // ボタンやパネル、シグナル等のオブジェクトのみ削除する
+    // オブジェクト名やプレフィックスに基づいて一括削除
+    ObjectsDeleteAll(0, g_panelPrefix);          // 情報パネル
+    ObjectsDeleteAll(0, InpLinePrefix_Pivot);    // ピボットライン
+    ObjectsDeleteAll(0, InpDotPrefix);           // ドットシグナル
+    ObjectsDeleteAll(0, InpArrowPrefix);         // 矢印シグナル
+    ObjectsDeleteAll(0, InpDivSignalPrefix);     // ダイバージェンスシグナル
+    ObjectsDeleteAll(0, "ManualTrend_");         // 手動ライン
+    ObjectsDeleteAll(0, "TPLine_");              // TPライン
+    ObjectsDeleteAll(0, "SplitLine_");           // 分割決済ライン
+
+    // ボタン類
     ObjectsDeleteAll(0, g_buttonName);
     ObjectsDeleteAll(0, g_clearButtonName);
     ObjectsDeleteAll(0, g_clearLinesButtonName);
-    ObjectsDeleteAll(0, g_panelPrefix);
-    ObjectsDeleteAll(0, InpLinePrefix_Pivot);
-    ObjectsDeleteAll(0, InpDotPrefix);
-    ObjectsDeleteAll(0, InpArrowPrefix);
-    ObjectsDeleteAll(0, InpDivSignalPrefix);
-    ObjectsDeleteAll(0, "ManualTrend_");
     ObjectsDeleteAll(0, BUTTON_BUY_CLOSE_ALL);
     ObjectsDeleteAll(0, BUTTON_SELL_CLOSE_ALL);
     ObjectsDeleteAll(0, BUTTON_ALL_CLOSE);
     ObjectsDeleteAll(0, BUTTON_RESET_BUY_TP);
     ObjectsDeleteAll(0, BUTTON_RESET_SELL_TP);
-    
-    // ★★★ 修正箇所: TPラインと分割ラインの削除処理をコメントアウト ★★★
-    // ObjectsDeleteAll(0, "TPLine_Buy");
-    // ObjectsDeleteAll(0, "TPLine_Sell");
-    // ObjectsDeleteAll(0, "SplitLine_");
 
+    ChartRedraw(); // 念のためチャートを再描画
+}
+
+//+------------------------------------------------------------------+
+//| エキスパート終了処理関数 (クリーン・スレート版)                  |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    // EAが作成した全てのオブジェクトをクリーンアップする
+    DeleteAllEaObjects();
+
+    // インジケータハンドルを解放
     IndicatorRelease(h_macd_exec);
     IndicatorRelease(h_macd_mid);
     IndicatorRelease(h_macd_long);
     IndicatorRelease(h_atr);
     IndicatorRelease(zigzagHandle);
-    PrintFormat("ApexFlowEA 終了: 理由=%d", reason);
+
+    PrintFormat("ApexFlowEA 終了: 理由=%d。全オブジェクトをクリーンアップしました。", reason);
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数                                         |
+//| エキスパートティック関数 (最終安定版)                            |
 //+------------------------------------------------------------------+
 void OnTick()
 {
+    // ピボットの時間足が更新されたら、ピボットラインと内部データを更新
     if(IsNewBar(InpPivotPeriod))
     {
-        UpdateLines();
+        UpdateLines();      // 内部データ更新
+        RedrawPivotLines(); // ピボット再描画
     }
+    
+    // M5の足が更新されたら、主要ロジックを実行
     if(IsNewBar(PERIOD_M5))
     {
         SyncManagedPositions();
-        if (InpPositionMode == MODE_AGGREGATE)
-        {
-            ManagePositionGroups();
-        }
-        else
-        {
-            DetectNewEntrances();
-        }
-        if (InpPositionMode == MODE_AGGREGATE)
-        {
-            CheckExitForGroup(buyGroup);
-            CheckExitForGroup(sellGroup);
-        }
-        else
-        {
-            CheckExits();
-        }
-        CheckEntry();
+
+        // TPライン、分割ライン、情報パネルを更新
         UpdateZones();
+        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); }
+        else { DetectNewEntrances(); }
         ManageInfoPanel();
+        
+        // 決済とエントリーロジック
+        if (InpPositionMode == MODE_AGGREGATE) { CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup); }
+        else { CheckExits(); }
+        CheckEntry();
+        
+        // 手動ライン管理
         ManageManualLines();
+        
+        ChartRedraw();
     }
 }
 
@@ -674,13 +777,15 @@ void ManagePositionGroups()
 
 
 //+------------------------------------------------------------------+
-//| ZigZagに基づくTPラインを更新する (修正版)
+//| 【置換】ZigZagに基づくTPラインを更新する (最終安定版 v2)         |
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
+    // 1. ZigZagレベルを計算
     double zigzag[];
     ArraySetAsSeries(zigzag, true);
     if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) <= 0) return;
+    
     double levelHigh = 0, levelLow = DBL_MAX;
     for(int i = 0; i < 100; i++)
     {
@@ -690,47 +795,63 @@ void UpdateZones()
             if(zigzag[i] < levelLow) levelLow = zigzag[i];
         }
     }
-    if(!isBuyTPManuallyMoved)
+
+    // 2. BUYサイドのTP価格を決定
+    double targetBuyTP = zonalFinalTPLine_Buy;
+    if (!isBuyTPManuallyMoved) // 手動で動かされていない場合のみ、ZigZagに基づいて更新
     {
-        double newBuyTP = (levelHigh > 0) ? levelHigh : 0;
-        if(buyGroup.isActive && buyGroup.highestScore >= InpScore_High && newBuyTP > 0)
+        targetBuyTP = (levelHigh > 0) ? levelHigh : 0;
+        // 高スコアポジションがある場合は、TPを拡張
+        if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High && targetBuyTP > 0)
         {
             double entryPrice = buyGroup.averageEntryPrice;
-            double originalDiff = newBuyTP - entryPrice;
-            if(originalDiff > 0) newBuyTP = entryPrice + (originalDiff * InpHighSchoreTpRratio);
-        }
-        if (newBuyTP > 0 && MathAbs(newBuyTP - zonalFinalTPLine_Buy) > g_pip)
-        {
-            zonalFinalTPLine_Buy = newBuyTP;
-            string name = "TPLine_Buy";
-            if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
-            ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy);
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-            ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
-            ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); // ★★★ Z-ORDERを設定
+            double originalDiff = targetBuyTP - entryPrice;
+            if (originalDiff > 0) targetBuyTP = entryPrice + (originalDiff * InpHighSchoreTpRratio);
         }
     }
-    if(!isSellTPManuallyMoved)
+    
+    // 3. BUYサイドのTPラインを描画・更新
+    if (targetBuyTP > 0)
     {
-        double newSellTP = (levelLow < DBL_MAX) ? levelLow : 0;
-        if(sellGroup.isActive && sellGroup.highestScore >= InpScore_High && newSellTP > 0)
+        zonalFinalTPLine_Buy = targetBuyTP; // グローバル変数を更新
+        string name = "TPLine_Buy";
+        if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+        
+        ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
+        ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); // 手動なら実線、自動なら点線
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
+    }
+
+    // 4. SELLサイドのTP価格を決定
+    double targetSellTP = zonalFinalTPLine_Sell;
+    if (!isSellTPManuallyMoved) // 手動で動かされていない場合のみ、ZigZagに基づいて更新
+    {
+        targetSellTP = (levelLow < DBL_MAX) ? levelLow : 0;
+        // 高スコアポジションがある場合は、TPを拡張
+        if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High && targetSellTP > 0)
         {
             double entryPrice = sellGroup.averageEntryPrice;
-            double originalDiff = entryPrice - newSellTP;
-            if(originalDiff > 0) newSellTP = entryPrice - (originalDiff * InpHighSchoreTpRratio);
+            double originalDiff = entryPrice - targetSellTP;
+            if (originalDiff > 0) targetSellTP = entryPrice - (originalDiff * InpHighSchoreTpRratio);
         }
-        if (newSellTP > 0 && MathAbs(newSellTP - zonalFinalTPLine_Sell) > g_pip)
-        {
-            zonalFinalTPLine_Sell = newSellTP;
-            string name = "TPLine_Sell";
-            if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
-            ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell);
-            ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-            ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
-            ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); // ★★★ Z-ORDERを設定
-        }
+    }
+
+    // 5. SELLサイドのTPラインを描画・更新
+    if (targetSellTP > 0)
+    {
+        zonalFinalTPLine_Sell = targetSellTP; // グローバル変数を更新
+        string name = "TPLine_Sell";
+        if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+
+        ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple);
+        ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, name, OBJPROP_STYLE, isSellTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); // 手動なら実線、自動なら点線
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
     }
 }
 
@@ -769,23 +890,39 @@ void DeleteGroupSplitLines(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| グループの決済条件をチェックする                                 |
+//| グループの決済条件をチェックする (安定化版)                      |
 //+------------------------------------------------------------------+
 void CheckExitForGroup(PositionGroup &group)
 {
     if (!group.isActive) return;
+
     int effectiveSplitCount = group.lockedInSplitCount;
     if (group.splitsDone >= effectiveSplitCount || effectiveSplitCount <= 0) return;
+
+    // ★★★【安全装置】★★★
+    // クラッシュの直接原因である配列アクセスを保護します。
+    // splitsDoneがsplitPrices配列のサイズ以上の場合、処理を中断してクラッシュを回避します。
+    if (group.splitsDone >= ArraySize(group.splitPrices))
+    {
+        PrintFormat("Error: splitsDone (%d) is out of range for splitPrices array (size: %d). Halting exit check for this tick.", group.splitsDone, ArraySize(group.splitPrices));
+        return;
+    }
+    // ★★★ 安全装置ここまで ★★★
+
     double price = group.isBuy ? SymbolInfoDouble(_Symbol, SYMBOL_BID) : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
     double nextSplitPrice = group.splitPrices[group.splitsDone];
+
     if(nextSplitPrice == 0) return;
+
     double buffer = InpExitBufferPips * g_pip;
     bool reached = (group.isBuy && price >= nextSplitPrice - buffer) || (!group.isBuy && price <= nextSplitPrice + buffer);
+
     if(reached)
     {
         double lotToClose = 0.0;
         double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
         double volStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
         if (group.splitsDone == effectiveSplitCount - 1)
         {
             lotToClose = group.totalLotSize;
@@ -801,11 +938,13 @@ void CheckExitForGroup(PositionGroup &group)
                 lotToClose += volStep;
             }
         }
+
         lotToClose = NormalizeDouble(lotToClose, 2);
         if (lotToClose > 0 && lotToClose < minLot)
         {
             lotToClose = minLot;
         }
+
         if (lotToClose > 0 && lotToClose >= minLot)
         {
             if(ExecuteGroupSplitExit(group, lotToClose))
@@ -819,7 +958,6 @@ void CheckExitForGroup(PositionGroup &group)
         }
     }
 }
-
 
 //+------------------------------------------------------------------+
 //| グループの分割決済を実行する                                     |
@@ -1117,22 +1255,26 @@ void CheckLineSignals(Line &line)
 }
 
 //+------------------------------------------------------------------+
-//| ライン情報を更新する                                             |
+//| 【置換】内部のライン「データ」を更新する (描画は分離)            |
 //+------------------------------------------------------------------+
 void UpdateLines()
 {
-    ArrayFree(allLines);
+    ArrayFree(allLines); // 内部データ配列をクリア
+
+    // ピボットラインが有効なら、そのデータを内部配列に追加
     if(InpUsePivotLines)
     {
-        CalculatePivot();
+        CalculatePivot(); // ピボット値は常に計算
         double p_prices[] = {s1, r1, s2, r2, s3, r3};
         ENUM_LINE_TYPE p_types[] = {LINE_TYPE_SUPPORT, LINE_TYPE_RESISTANCE, LINE_TYPE_SUPPORT, LINE_TYPE_RESISTANCE, LINE_TYPE_SUPPORT, LINE_TYPE_RESISTANCE};
         color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
         string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
+
         for(int i = 0; i < 6; i++)
         {
             if(i >= 2 && !InpShowS2R2) continue;
             if(i >= 4 && !InpShowS3R3) continue;
+
             Line line;
             line.name = p_names[i];
             line.price = p_prices[i];
@@ -1143,7 +1285,8 @@ void UpdateLines()
             allLines[size] = line;
         }
     }
-    DrawPivotLine();
+
+    // 手動ラインのデータを内部配列に追加
     MqlTick tick;
     if(SymbolInfoTick(_Symbol, tick))
     {
@@ -1153,6 +1296,7 @@ void UpdateLines()
             if(StringFind(objName, "ManualTrend_") != 0) continue;
             string obj_text = ObjectGetString(0, objName, OBJPROP_TEXT);
             if(StringFind(obj_text, "-Broken") >= 0) continue;
+            
             Line m_line;
             m_line.name = "Manual_" + StringSubstr(objName, StringFind(objName, "_", 0) + 1);
             m_line.price = ObjectGetDouble(0, objName, OBJPROP_PRICE, 0);
@@ -1187,47 +1331,6 @@ void CalculatePivot()
     {
         s3 = s2 - (r2 - s2);
         r3 = r2 + (r2 - s2);
-    }
-}
-
-//+------------------------------------------------------------------+
-//| ピボットラインを描画する                                         |
-//+------------------------------------------------------------------+
-void DrawPivotLine()
-{
-    datetime new_start_time = iTime(_Symbol, InpPivotPeriod, 0);
-    for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--)
-    {
-        string name = ObjectName(0, i, -1, OBJ_TREND);
-        if(StringFind(name, InpLinePrefix_Pivot) == 0)
-        {
-            if(ObjectGetInteger(0, name, OBJPROP_RAY_RIGHT) == true)
-            {
-                ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
-                ObjectSetInteger(0, name, OBJPROP_TIME, 1, new_start_time);
-            }
-        }
-    }
-    string ts = TimeToString(new_start_time, TIME_DATE|TIME_MINUTES);
-    StringReplace(ts, ":", "_");
-    StringReplace(ts, ".", "_");
-    double p_prices[] = {s1, r1, s2, r2, s3, r3};
-    color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
-    string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
-    for(int i=0; i<6; i++)
-    {
-        if(i >= 2 && !InpShowS2R2) continue;
-        if(i >= 4 && !InpShowS3R3) continue;
-        string name = InpLinePrefix_Pivot + p_names[i] + "_" + ts;
-        if(ObjectFind(0, name) < 0)
-        {
-            if(ObjectCreate(0, name, OBJ_TREND, 0, new_start_time, p_prices[i], new_start_time + PeriodSeconds(InpPivotPeriod), p_prices[i]))
-            {
-                ObjectSetInteger(0, name, OBJPROP_COLOR, p_colors[i]);
-                ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
-                ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            }
-        }
     }
 }
 

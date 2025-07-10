@@ -52,7 +52,7 @@ struct PositionInfo
     int  score;  // エントリー時のスコア
 };
 
-// スコアリングの各要素の検知状況を保持する構造体
+// スコアリングの各要素の検知状況と点数を保持する構造体 (修正版)
 struct ScoreComponentInfo
 {
     bool divergence;
@@ -62,6 +62,16 @@ struct ScoreComponentInfo
     bool mid_hist_sync;
     bool mid_zeroline;
     bool long_zeroline;
+    
+    // ★★★ 各項目のスコアを保持する変数を追加 ★★★
+    int score_divergence;
+    int score_exec_angle;
+    int score_mid_angle;
+    int score_exec_hist;
+    int score_mid_hist_sync;
+    int score_mid_zeroline;
+    int score_long_zeroline;
+    
     int  total_score;
 };
 
@@ -165,6 +175,7 @@ input ENUM_PANEL_CORNER InpPanelCorner = PC_LEFT_UPPER; // パネルの表示コ
 input bool           InpShowInfoPanel        = true;     // 情報パネルを表示する
 input int            p_panel_x_offset        = 10;       // パネルX位置
 input int            p_panel_y_offset        = 130;      // パネルY位置
+input int            InpPanelFontSize        = 8;        // パネルのフォントサイズ
 input bool           InpEnableButtons        = true;     // ボタン表示を有効にする
 
 input group "=== 取引設定 ===";
@@ -1319,7 +1330,7 @@ void PlaceOrder(bool isBuy, double price, int score)
 }
 
 //+------------------------------------------------------------------+
-//| ラインに対するシグナルを検出する (エラー修正版)                  |
+//| ラインに対するシグナルを検出する (フラグリセット削除 最終FIX版)  |
 //+------------------------------------------------------------------+
 void CheckLineSignals(Line &line)
 {
@@ -1327,9 +1338,11 @@ void CheckLineSignals(Line &line)
     ArraySetAsSeries(rates, true);
     if(CopyRates(_Symbol, _Period, 0, 2, rates) < 2) return;
 
-    // ★★★ 変更点: 永続化された状態のインデックスを取得 ★★★
     int stateIndex = GetLineState(line.name);
 
+    // --- ★★★ ここから下を削除 ★★★ ---
+    // 問題の原因となっていた、安易にフラグをリセットするロジックを完全に削除します。
+    /*
     if(g_lineStates[stateIndex].isBrokeUp && rates[0].close < line.price)
     {
         g_lineStates[stateIndex].isBrokeUp = false;
@@ -1338,7 +1351,11 @@ void CheckLineSignals(Line &line)
     {
         g_lineStates[stateIndex].isBrokeDown = false;
     }
+    */
+    // --- ★★★ ここまでを削除 ★★★ ---
 
+    // ブレイク後に再シグナルを許可しない設定の場合、ここで処理を終了
+    // フラグがリセットされなくなったため、この制御が正しく永続的に機能します。
     if((g_lineStates[stateIndex].isBrokeUp || g_lineStates[stateIndex].isBrokeDown) && !InpAllowSignalAfterBreak)
     {
         return;
@@ -1355,26 +1372,30 @@ void CheckLineSignals(Line &line)
     {
         if(line.type == LINE_TYPE_RESISTANCE)
         {
+            // タッチ（反発）サインのチェック
             if(prev_open <= line.price && prev_high >= line.price && prev_close <= line.price)
             {
                 CreateSignalObject(InpDotPrefix + "TouchRebound_Sell_" + line.name, prevBarTime, line.price + offset, line.signalColor, InpTouchReboundDownCode, line.name + " タッチ反発(売り)");
             }
+            // ブレイクサインのチェック
             if(InpBreakMode && !g_lineStates[stateIndex].isBrokeUp && prev_open < line.price && prev_close >= line.price)
             {
                 CreateSignalObject(InpArrowPrefix + "TouchBreak_Buy_" + line.name, prevBarTime, prev_low - offset, line.signalColor, InpTouchBreakUpCode, line.name + " タッチブレイク(買い)");
-                g_lineStates[stateIndex].isBrokeUp = true; // ★★★ 永続的な状態を更新 ★★★
+                g_lineStates[stateIndex].isBrokeUp = true; // ブレイク済みフラグを立てる（以降リセットされない）
             }
         }
         else // LINE_TYPE_SUPPORT
         {
+            // タッチ（反発）サインのチェック
             if(prev_open >= line.price && prev_low <= line.price && prev_close >= line.price)
             {
                 CreateSignalObject(InpDotPrefix + "TouchRebound_Buy_" + line.name, prevBarTime, line.price - offset, line.signalColor, InpTouchReboundUpCode, line.name + " タッチ反発(買い)");
             }
+            // ブレイクサインのチェック
             if(InpBreakMode && !g_lineStates[stateIndex].isBrokeDown && prev_open > line.price && prev_close <= line.price)
             {
                 CreateSignalObject(InpArrowPrefix + "TouchBreak_Sell_" + line.name, prevBarTime, prev_high + offset, line.signalColor, InpTouchBreakDownCode, line.name + " タッチブレイク(売り)");
-                g_lineStates[stateIndex].isBrokeDown = true; // ★★★ 永続的な状態を更新 ★★★
+                g_lineStates[stateIndex].isBrokeDown = true; // ブレイク済みフラグを立てる（以降リセットされない）
             }
         }
     }
@@ -1935,7 +1956,7 @@ void SyncManagedPositions()
 }
 
 //+------------------------------------------------------------------+
-//| 情報パネルの管理 (作成と更新) (最終調整版)
+//| 情報パネルの管理 (サイズ変更対応版)                              |
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
@@ -1952,17 +1973,31 @@ void ManageInfoPanel()
     ScoreComponentInfo buy_info  = CalculateMACDScore(true);
     ScoreComponentInfo sell_info = CalculateMACDScore(false);
     AddPanelLine(panel_lines, "--- Score Details ---");
-    AddPanelLine(panel_lines, "              [ Buy / Sell ]");
-    AddPanelLine(panel_lines, "Divergence:   [ " + (string)(buy_info.divergence ? "✔" : "-") + " / " + (string)(sell_info.divergence ? "✔" : "-") + " ]");
-    string zero_buy  = (string)(buy_info.mid_zeroline ? "✔" : "-") + "/" + (string)(buy_info.long_zeroline ? "✔" : "-");
-    string zero_sell = (string)(sell_info.mid_zeroline ? "✔" : "-") + "/" + (string)(sell_info.long_zeroline ? "✔" : "-");
-    AddPanelLine(panel_lines, "Zero(M/L):    [ " + zero_buy + " / " + zero_sell + " ]");
-    string angle_buy = (string)(buy_info.exec_angle ? "✔" : "-") + "/" + (string)(buy_info.mid_angle ? "✔" : "-");
-    string angle_sell= (string)(sell_info.exec_angle ? "✔" : "-") + "/" + (string)(sell_info.mid_angle ? "✔" : "-");
-    AddPanelLine(panel_lines, "Angle(E/M):   [ " + angle_buy + " / " + angle_sell + " ]");
-    string hist_buy = (string)(buy_info.exec_hist ? "✔" : "-") + "/" + (string)(buy_info.mid_hist_sync ? "✔" : "-");
-    string hist_sell= (string)(sell_info.exec_hist ? "✔" : "-") + "/" + (string)(sell_info.mid_hist_sync ? "✔" : "-");
-    AddPanelLine(panel_lines, "Hist(E/M):    [ " + hist_buy + " / " + hist_sell + " ]");
+    
+    AddPanelLine(panel_lines, "             [ Buy / Sell ]");
+    
+    string div_buy_str  = buy_info.score_divergence > 0 ? (string)buy_info.score_divergence : "-";
+    string div_sell_str = sell_info.score_divergence > 0 ? (string)sell_info.score_divergence : "-";
+    AddPanelLine(panel_lines, "Divergence:  [ " + div_buy_str + " / " + div_sell_str + " ]");
+
+    string zero_buy  = (buy_info.score_mid_zeroline > 0 ? (string)buy_info.score_mid_zeroline : "-") + "/" + 
+                       (buy_info.score_long_zeroline > 0 ? (string)buy_info.score_long_zeroline : "-");
+    string zero_sell = (sell_info.score_mid_zeroline > 0 ? (string)sell_info.score_mid_zeroline : "-") + "/" + 
+                       (sell_info.score_long_zeroline > 0 ? (string)sell_info.score_long_zeroline : "-");
+    AddPanelLine(panel_lines, "Zero(M/L):   [ " + zero_buy + " / " + zero_sell + " ]");
+
+    string angle_buy = (buy_info.score_exec_angle > 0 ? (string)buy_info.score_exec_angle : "-") + "/" + 
+                       (buy_info.score_mid_angle > 0 ? (string)buy_info.score_mid_angle : "-");
+    string angle_sell= (sell_info.score_exec_angle > 0 ? (string)sell_info.score_exec_angle : "-") + "/" + 
+                       (sell_info.score_mid_angle > 0 ? (string)sell_info.score_mid_angle : "-");
+    AddPanelLine(panel_lines, "Angle(E/M):  [ " + angle_buy + " / " + angle_sell + " ]");
+
+    string hist_buy = (buy_info.score_exec_hist > 0 ? (string)buy_info.score_exec_hist : "-") + "/" + 
+                      (buy_info.score_mid_hist_sync > 0 ? (string)buy_info.score_mid_hist_sync : "-");
+    string hist_sell= (sell_info.score_exec_hist > 0 ? (string)sell_info.score_exec_hist : "-") + "/" + 
+                      (sell_info.score_mid_hist_sync > 0 ? (string)sell_info.score_mid_hist_sync : "-");
+    AddPanelLine(panel_lines, "Hist(E/M):   [ " + hist_buy + " / " + hist_sell + " ]");
+    
     AddPanelLine(panel_lines, "──────────────────────");
     AddPanelLine(panel_lines, "Forecast: Buy " + (string)buy_info.total_score + " / Sell " + (string)sell_info.total_score);
     AddPanelLine(panel_lines, "──────────────────────");
@@ -1977,8 +2012,10 @@ void ManageInfoPanel()
         case PC_LEFT_LOWER:   corner = CORNER_LEFT_LOWER;   break;
         case PC_RIGHT_LOWER:  corner = CORNER_RIGHT_LOWER;  break;
     }
+    
+    // ★★★ 変更点: フォントサイズに応じて行の高さを動的に変更 ★★★
+    int line_height = (int)round(InpPanelFontSize * 1.5);
 
-    int line_height = 12;
     for(int i = 0; i < ArraySize(panel_lines); i++)
     {
         string obj_name = g_panelPrefix + (string)i;
@@ -1989,9 +2026,9 @@ void ManageInfoPanel()
             ObjectSetInteger(0, obj_name, OBJPROP_XDISTANCE, p_panel_x_offset);
             ObjectSetInteger(0, obj_name, OBJPROP_CORNER, corner);
             ObjectSetString(0, obj_name, OBJPROP_FONT, "Lucida Console");
-            ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, 8);
+            // ★★★ 変更点: フォントサイズを入力パラメータから取得 ★★★
+            ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, InpPanelFontSize);
             
-            // ★★★ ロジック追加: 右側のコーナーが選択されたら、文字を右揃えにする ★★★
             if(InpPanelCorner == PC_RIGHT_UPPER || InpPanelCorner == PC_RIGHT_LOWER)
             {
                 ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, ANCHOR_RIGHT);
@@ -2026,12 +2063,13 @@ void AddPanelLine(string &lines[], const string text)
 }
 
 //+------------------------------------------------------------------+
-//| MACD指標に基づく取引スコアを計算                                 |
+//| MACD指標に基づく取引スコアを計算 (スコア内訳記録版)              |
 //+------------------------------------------------------------------+
 ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
 {
     ScoreComponentInfo info;
-    ZeroMemory(info);
+    ZeroMemory(info); // 構造体を0で初期化
+    
     double exec_main[], exec_signal[];
     double mid_main[], mid_signal[];
     double long_main[];
@@ -2040,9 +2078,12 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
     ArraySetAsSeries(mid_main, true);
     ArraySetAsSeries(mid_signal, true);
     ArraySetAsSeries(long_main, true);
+    
     if(CopyBuffer(h_macd_exec, 0, 0, 30, exec_main) < 30 || CopyBuffer(h_macd_exec, 1, 0, 30, exec_signal) < 30) return info;
     if(CopyBuffer(h_macd_mid, 0, 0, 4, mid_main) < 4 || CopyBuffer(h_macd_mid, 1, 0, 1, mid_signal) < 1) return info;
     if(CopyBuffer(h_macd_long, 0, 0, 1, long_main) < 1) return info;
+    
+    // --- 条件判定 ---
     if(is_buy_signal)
     {
         if(CheckMACDDivergence(true, h_macd_exec)) info.divergence = true;
@@ -2065,13 +2106,16 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
         if(h0 < h1 && h1 < 0 && h2 < 0) info.exec_hist = true;
         if(mid_main[0] - mid_signal[0] < 0) info.mid_hist_sync = true;
     }
-    if(info.divergence)   info.total_score += 3;
-    if(info.mid_zeroline)  info.total_score += 2;
-    if(info.long_zeroline) info.total_score += 3;
-    if(info.exec_angle)    info.total_score += 1;
-    if(info.mid_angle)     info.total_score += 2;
-    if(info.exec_hist)     info.total_score += 1;
-    if(info.mid_hist_sync) info.total_score += 1;
+    
+    // ★★★ スコアリングと内訳の記録 ★★★
+    if(info.divergence)   { info.score_divergence   = 3; info.total_score += info.score_divergence;   }
+    if(info.mid_zeroline)  { info.score_mid_zeroline  = 2; info.total_score += info.score_mid_zeroline;  }
+    if(info.long_zeroline) { info.score_long_zeroline = 3; info.total_score += info.score_long_zeroline; }
+    if(info.exec_angle)    { info.score_exec_angle    = 1; info.total_score += info.score_exec_angle;    }
+    if(info.mid_angle)     { info.score_mid_angle     = 2; info.total_score += info.score_mid_angle;     }
+    if(info.exec_hist)     { info.score_exec_hist     = 1; info.total_score += info.score_exec_hist;     }
+    if(info.mid_hist_sync) { info.score_mid_hist_sync = 1; info.total_score += info.score_mid_hist_sync; }
+    
     return info;
 }
 

@@ -364,10 +364,11 @@ int OnInit()
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート終了処理関数                                         |
+//| エキスパート終了処理関数 (修正版)
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    // ボタンやパネル、シグナル等のオブジェクトのみ削除する
     ObjectsDeleteAll(0, g_buttonName);
     ObjectsDeleteAll(0, g_clearButtonName);
     ObjectsDeleteAll(0, g_clearLinesButtonName);
@@ -382,9 +383,12 @@ void OnDeinit(const int reason)
     ObjectsDeleteAll(0, BUTTON_ALL_CLOSE);
     ObjectsDeleteAll(0, BUTTON_RESET_BUY_TP);
     ObjectsDeleteAll(0, BUTTON_RESET_SELL_TP);
-    ObjectsDeleteAll(0, "TPLine_Buy");
-    ObjectsDeleteAll(0, "TPLine_Sell");
-    ObjectsDeleteAll(0, "SplitLine_");
+    
+    // ★★★ 修正箇所: TPラインと分割ラインの削除処理をコメントアウト ★★★
+    // ObjectsDeleteAll(0, "TPLine_Buy");
+    // ObjectsDeleteAll(0, "TPLine_Sell");
+    // ObjectsDeleteAll(0, "SplitLine_");
+
     IndicatorRelease(h_macd_exec);
     IndicatorRelease(h_macd_mid);
     IndicatorRelease(h_macd_long);
@@ -670,7 +674,7 @@ void ManagePositionGroups()
 
 
 //+------------------------------------------------------------------+
-//| ZigZagに基づくTPラインを更新する                                 |
+//| ZigZagに基づくTPラインを更新する (修正版)
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
@@ -704,6 +708,7 @@ void UpdateZones()
             ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
             ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
             ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+            ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); // ★★★ Z-ORDERを設定
         }
     }
     if(!isSellTPManuallyMoved)
@@ -724,12 +729,13 @@ void UpdateZones()
             ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple);
             ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
             ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+            ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); // ★★★ Z-ORDERを設定
         }
     }
 }
 
 //+------------------------------------------------------------------+
-//| 分割決済ラインを更新する                                         |
+//| 分割決済ラインを更新する (修正版)
 //+------------------------------------------------------------------+
 void UpdateGroupSplitLines(PositionGroup &group)
 {
@@ -749,6 +755,7 @@ void UpdateGroupSplitLines(PositionGroup &group)
         ObjectCreate(0, group.splitLineNames[i], OBJ_HLINE, 0, 0, group.splitPrices[i]);
         ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_COLOR, group.isBuy ? clrGoldenrod : clrPurple);
         ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_STYLE, STYLE_DOT);
+        ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_ZORDER, 5); // ★★★ Z-ORDERを設定
     }
 }
 
@@ -1308,7 +1315,7 @@ void CheckExits()
 }
 
 //+------------------------------------------------------------------+
-//| 個別モード：新規ポジションの分割決済データを準備する             |
+//| 個別モード：新規ポジションの分割決済データを準備する (修正版)
 //+------------------------------------------------------------------+
 void AddSplitData(ulong ticket)
 {
@@ -1359,6 +1366,7 @@ void AddSplitData(ulong ticket)
             ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, newSplit.splitPrices[i]);
             ObjectSetInteger(0, lineName, OBJPROP_COLOR, newSplit.isBuy ? clrGoldenrod : clrPurple);
             ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
+            ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 5); // ★★★ Z-ORDERを設定
         }
     }
     int size = ArraySize(splitPositions);

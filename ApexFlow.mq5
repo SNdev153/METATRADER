@@ -276,6 +276,8 @@ bool         isBuyTPManuallyMoved = false, isSellTPManuallyMoved = false;
 datetime     lastTradeTime;
 bool         g_ignoreNextChartClick = false;
 datetime    g_lastPivotDrawTime = 0; // ピボットを最後に描画した時間足を記憶
+ENUM_TP_MODE      prev_tp_mode      = WRONG_VALUE; // TPモードの前回値を記憶
+ENUM_TIMEFRAMES   prev_tp_timeframe = WRONG_VALUE; // TP時間足の前回値を記憶
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -474,6 +476,11 @@ int OnInit()
     
     Print("ApexFlowEA v4.0 初期化完了 (最終アーキテクチャ版)");
     return(INIT_SUCCEEDED);
+    prev_tp_mode = InpTPLineMode;
+    prev_tp_timeframe = InpTP_Timeframe;
+    
+    Print("ApexFlowEA v4.0 初期化完了 (最終アーキテクチャ版)");
+    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
@@ -523,12 +530,25 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (最終アーキテクチャ版)                  |
+//| エキスパートティック関数 (呼び出し順序 修正版)                   |
 //+------------------------------------------------------------------+
 void OnTick()
 {
     if(IsNewBar(PERIOD_M5))
     {
+        // === パラメータ変更検知ブロック ===
+        if(prev_tp_mode != InpTPLineMode || prev_tp_timeframe != InpTP_Timeframe)
+        {
+            Print("TP設定の変更を検知しました。TPラインをリセットします。");
+            isBuyTPManuallyMoved = false;
+            isSellTPManuallyMoved = false;
+            zonalFinalTPLine_Buy = 0;
+            zonalFinalTPLine_Sell = 0;
+            prev_tp_mode = InpTPLineMode;
+            prev_tp_timeframe = InpTP_Timeframe;
+        }
+
+        // === 描画 & 状態管理ブロック ===
         datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
         if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
         {
@@ -537,13 +557,22 @@ void OnTick()
             g_lastPivotDrawTime = currentPivotBarTime;
         }
 
-        SyncManagedPositions(); UpdateZones();
-        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } else { DetectNewEntrances(); }
+        // ★★★ 修正点：呼び出し順序を変更 ★★★
+        // 1. まずポジション状態を完全に更新する
+        SyncManagedPositions(); 
+        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } 
+        else { DetectNewEntrances(); }
+
+        // 2. 更新されたポジション状態に基づいて、UI（TPライン等）を更新する
+        UpdateZones();
         ManageInfoPanel();
         
-        if (InpPositionMode == MODE_AGGREGATE) { CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup); } else { CheckExits(); }
+        // === 取引実行ブロック ===
+        if (InpPositionMode == MODE_AGGREGATE) { CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup); } 
+        else { CheckExits(); }
         CheckEntry();
         
+        // === その他管理ブロック ===
         ManageManualLines();
         ChartRedraw();
     }
@@ -790,7 +819,7 @@ void ManagePositionGroups()
 
 
 //+------------------------------------------------------------------+
-//| 独立したTP時間足で計算するUpdateZones (最終版)                   |
+//| 独立したTP時間足で計算するUpdateZones (有利方向 自動選択版)      |
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
@@ -800,136 +829,73 @@ void UpdateZones()
     // --- 1. 選択されたモードに応じてTP価格を計算 ---
     switch(InpTPLineMode)
     {
-        // --- A) ZigZagモードのロジック ---
         case MODE_ZIGZAG:
         {
-            // InpTP_Timeframeで初期化されたzigzagHandleを使用
-            double zigzag[];
-            ArraySetAsSeries(zigzag, true);
+            double zigzag[]; ArraySetAsSeries(zigzag, true);
             if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0)
             {
                 double levelHigh = 0, levelLow = DBL_MAX;
-                for(int i = 0; i < 100; i++)
-                {
-                    if(zigzag[i] > 0)
-                    {
-                        if(zigzag[i] > levelHigh) levelHigh = zigzag[i];
-                        if(zigzag[i] < levelLow) levelLow = zigzag[i];
-                    }
-                }
+                for(int i = 0; i < 100; i++){ if(zigzag[i] > 0){ if(zigzag[i] > levelHigh) levelHigh = zigzag[i]; if(zigzag[i] < levelLow) levelLow = zigzag[i]; } }
                 new_buy_tp = levelHigh;
                 new_sell_tp = (levelLow < DBL_MAX) ? levelLow : 0;
             }
             break;
         }
 
-        // --- B) ピボットモードのロジック (TP専用時間足で計算) ---
         case MODE_PIVOT:
         {
             MqlRates rates[];
-            // InpTP_Timeframe の一つ前の足からデータを取得してピボットを計算
             if(CopyRates(_Symbol, InpTP_Timeframe, 1, 1, rates) > 0)
             {
-                double h = rates[0].high;
-                double l = rates[0].low;
-                double c = rates[0].close;
-                double p = (h + l + c) / 3.0;
-                double r1 = 2.0 * p - l;
-                double s1 = 2.0 * p - h;
-                double r2 = p + (h - l);
-                double s2 = p - (h - l);
-                double r3 = h + 2.0 * (p - l);
-                double s3 = l - 2.0 * (h - p);
+                // ピボットレベルをすべて計算
+                double h = rates[0].high, l = rates[0].low, c = rates[0].close;
+                double p = (h + l + c) / 3.0, r1 = 2.0 * p - l, s1 = 2.0 * p - h, r2 = p + (h - l), s2 = p - (h - l), r3 = h + 2.0 * (p - l), s3 = l - 2.0 * (h - p);
 
-                // BUYポジションのTP = 最も近いレジスタンスライン
-                if (buyGroup.isActive)
+                // ★★★ 新ロジック ★★★
+                // 基準となる価格を決定（ポジションがあればその建値、なければ現在値）
+                double current_price = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
+                double buy_ref_price = buyGroup.isActive ? buyGroup.averageEntryPrice : current_price;
+                double sell_ref_price = sellGroup.isActive ? sellGroup.averageEntryPrice : current_price;
+
+                // 【BUYサイドのTP】基準価格より上にある、最も近いレジスタンスを探す
+                double resistances[] = {r1, r2, r3};
+                double closest_r = 0;
+                for(int i=0; i<ArraySize(resistances); i++)
                 {
-                    double resistances[] = {r1, r2, r3};
-                    double closest_r = 0;
-                    for(int i=0; i<ArraySize(resistances); i++)
+                    if(resistances[i] > buy_ref_price)
                     {
-                        if(resistances[i] > buyGroup.averageEntryPrice)
+                        if(closest_r == 0 || resistances[i] < closest_r)
                         {
-                            if(closest_r == 0 || resistances[i] < closest_r)
-                            {
-                                closest_r = resistances[i];
-                            }
+                            closest_r = resistances[i];
                         }
                     }
-                    new_buy_tp = closest_r;
                 }
-                // SELLポジションのTP = 最も近いサポートライン
-                if (sellGroup.isActive)
+                new_buy_tp = closest_r;
+
+                // 【SELLサイドのTP】基準価格より下にある、最も近いサポートを探す
+                double supports[] = {s1, s2, s3};
+                double closest_s = 0;
+                for(int i=0; i<ArraySize(supports); i++)
                 {
-                    double supports[] = {s1, s2, s3};
-                    double closest_s = 0;
-                    for(int i=0; i<ArraySize(supports); i++)
+                    if(supports[i] < sell_ref_price && supports[i] > 0)
                     {
-                        if(supports[i] < sellGroup.averageEntryPrice)
+                        if(closest_s == 0 || supports[i] > closest_s)
                         {
-                            if(closest_s == 0 || supports[i] > closest_s)
-                            {
-                                closest_s = supports[i];
-                            }
+                            closest_s = supports[i];
                         }
                     }
-                    new_sell_tp = closest_s;
                 }
+                new_sell_tp = closest_s;
             }
             break;
         }
     }
     
-    // --- 2. 最終的なTP価格を決定し、ラインを描画（この部分は変更なし）---
-    if (!isBuyTPManuallyMoved)
-    {
-        if (new_buy_tp > 0)
-        {
-            double final_buy_tp = new_buy_tp;
-            if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High)
-            {
-                 double originalDiff = final_buy_tp - buyGroup.averageEntryPrice;
-                 if (originalDiff > 0) final_buy_tp = buyGroup.averageEntryPrice + (originalDiff * InpHighSchoreTpRratio);
-            }
-            zonalFinalTPLine_Buy = final_buy_tp;
-        }
-    }
-    if (zonalFinalTPLine_Buy > 0)
-    {
-        string name = "TPLine_Buy";
-        if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
-        ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy);
-        ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
-        ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-        ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT);
-        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
-        ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
-    }
-
-    if (!isSellTPManuallyMoved)
-    {
-        if (new_sell_tp > 0)
-        {
-            double final_sell_tp = new_sell_tp;
-             if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High)
-             {
-                 double originalDiff = sellGroup.averageEntryPrice - final_sell_tp;
-                 if (originalDiff > 0) final_sell_tp = sellGroup.averageEntryPrice - (originalDiff * InpHighSchoreTpRratio);
-             }
-            zonalFinalTPLine_Sell = final_sell_tp;
-        }
-    }
-    if (zonalFinalTPLine_Sell > 0)
-    {
-        string name = "TPLine_Sell";
-        if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
-        ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell);
-        ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple);
-        ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-        ObjectSetInteger(0, name, OBJPROP_STYLE, isSellTPManuallyMoved ? STYLE_SOLID : STYLE_DOT);
-        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
-        ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
-    }
+    // --- 2. 最終的なTP価格を決定し、ラインを描画 ---
+    if (!isBuyTPManuallyMoved){ if (new_buy_tp > 0){ double final_buy_tp = new_buy_tp; if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High){ double originalDiff = final_buy_tp - buyGroup.averageEntryPrice; if (originalDiff > 0) final_buy_tp = buyGroup.averageEntryPrice + (originalDiff * InpHighSchoreTpRratio); } zonalFinalTPLine_Buy = final_buy_tp; } }
+    if (zonalFinalTPLine_Buy > 0){ string name = "TPLine_Buy"; if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0); ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy); ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2); ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true); ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); }
+    if (!isSellTPManuallyMoved){ if (new_sell_tp > 0){ double final_sell_tp = new_sell_tp; if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High){ double originalDiff = sellGroup.averageEntryPrice - final_sell_tp; if (originalDiff > 0) final_sell_tp = sellGroup.averageEntryPrice - (originalDiff * InpHighSchoreTpRratio); } zonalFinalTPLine_Sell = final_sell_tp; } }
+    if (zonalFinalTPLine_Sell > 0){ string name = "TPLine_Sell"; if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0); ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell); ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2); ObjectSetInteger(0, name, OBJPROP_STYLE, isSellTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true); ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); }
 }
 
 //+------------------------------------------------------------------+

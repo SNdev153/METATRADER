@@ -163,6 +163,8 @@ input bool           InpEnableButtons        = true;     // ボタン表示を�
 input group "=== 取引設定 ===";
 input double         InpLotSize              = 0.1;      // ロットサイズ
 input int            InpMaxPositions         = 5;        // 同方向の最大ポジション数
+input bool     InpEnableEntrySpacing = true;             // ポジション間隔フィルターを有効にする
+input double   InpEntrySpacingPips   = 10.0;             // 最低限確保するポジション間隔 (pips)
 input int            InpMagicNumber          = 123456;   // マジックナンバー
 input int            InpDotTimeout           = 600;      // ドット/矢印有効期限 (秒)
 
@@ -353,7 +355,7 @@ void UpdateAllVisuals()
 }
 
 //+------------------------------------------------------------------+
-//| 【括弧修正・最終完成版】ピボット管理関数                         |
+//| 【最終統合版】すべての修正を統合したピボット管理関数             |
 //+------------------------------------------------------------------+
 void ManagePivotLines()
 {
@@ -369,8 +371,6 @@ void ManagePivotLines()
     for(int i = InpPivotHistoryCount; i >= 0; i--)
     {
         MqlRates rates[];
-        // i=0(現在)の時は、一つ前の足(index=1)から計算
-        // i=1(過去)の時は、二つ前の足(index=2)から計算...
         if(CopyRates(_Symbol, InpPivotPeriod, i + 1, 1, rates) < 1) continue;
 
         double h = rates[0].high;
@@ -381,10 +381,10 @@ void ManagePivotLines()
         double p_val = (h + l + c) / 3.0;
         double s1_val = 2.0 * p_val - h;
         double r1_val = 2.0 * p_val - l;
-        double s2_val = s1_val - (r1_val - s1_val);
-        double r2_val = r1_val + (r1_val - s1_val);
-        double s3_val = s2_val - (r2_val - s2_val);
-        double r3_val = r2_val + (r2_val - s2_val);
+        double s2_val = p_val - (h - l);
+        double r2_val = p_val + (h - l);
+        double s3_val = l - 2.0 * (h - p_val);
+        double r3_val = h + 2.0 * (p_val - l);
         
         // i=0（現在）の場合のみ、計算結果をグローバル変数に反映させる
         if(i == 0)
@@ -410,16 +410,16 @@ void ManagePivotLines()
             if (p_prices[j] <= 0) continue;
 
             string name = InpLinePrefix_Pivot + p_names[j] + "_" + IntegerToString(lineTime);
-            
             datetime startTime = lineTime;
             datetime endTime;
 
+            // ★★★ 以前修正した、正しい描画ロジック ★★★
             if(rayRight) {
-                // 現在ラインの場合：1期間分の短い線分を定義し、そこから右に延長させる
+                // 現在ラインの場合：1期間分の短い線分を定義し、そこから右に延長
                 endTime = startTime + periodSeconds;
             } else {
-                // 過去ラインの場合：期間の終わりきっかりで描画を止める
-                endTime = startTime + periodSeconds - 1;
+                // 過去ラインの場合：期間の終わりで描画を止める
+                endTime = (datetime)(startTime + periodSeconds - 1);
             }
 
             if (ObjectCreate(0, name, OBJ_TREND, 0, startTime, p_prices[j], endTime, p_prices[j]))
@@ -819,79 +819,48 @@ void ManagePositionGroups()
 
 
 //+------------------------------------------------------------------+
-//| 独立したTP時間足で計算するUpdateZones (有利方向 自動選択版)      |
+//| 独立したTP時間足で計算するUpdateZones (最終クリーン版)           |
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
     double new_buy_tp = 0;
     double new_sell_tp = 0;
 
-    // --- 1. 選択されたモードに応じてTP価格を計算 ---
     switch(InpTPLineMode)
     {
         case MODE_ZIGZAG:
         {
             double zigzag[]; ArraySetAsSeries(zigzag, true);
-            if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0)
-            {
-                double levelHigh = 0, levelLow = DBL_MAX;
-                for(int i = 0; i < 100; i++){ if(zigzag[i] > 0){ if(zigzag[i] > levelHigh) levelHigh = zigzag[i]; if(zigzag[i] < levelLow) levelLow = zigzag[i]; } }
-                new_buy_tp = levelHigh;
-                new_sell_tp = (levelLow < DBL_MAX) ? levelLow : 0;
-            }
+            if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0){ double levelHigh = 0, levelLow = DBL_MAX; for(int i = 0; i < 100; i++){ if(zigzag[i] > 0){ if(zigzag[i] > levelHigh) levelHigh = zigzag[i]; if(zigzag[i] < levelLow) levelLow = zigzag[i]; } } new_buy_tp = levelHigh; new_sell_tp = (levelLow < DBL_MAX) ? levelLow : 0; }
             break;
         }
-
         case MODE_PIVOT:
         {
             MqlRates rates[];
             if(CopyRates(_Symbol, InpTP_Timeframe, 1, 1, rates) > 0)
             {
-                // ピボットレベルをすべて計算
-                double h = rates[0].high, l = rates[0].low, c = rates[0].close;
-                double p = (h + l + c) / 3.0, r1 = 2.0 * p - l, s1 = 2.0 * p - h, r2 = p + (h - l), s2 = p - (h - l), r3 = h + 2.0 * (p - l), s3 = l - 2.0 * (h - p);
+                double h_tp = rates[0].high, l_tp = rates[0].low, c_tp = rates[0].close;
+                double p_tp = (h_tp + l_tp + c_tp) / 3.0;
+                double r1_tp = 2.0 * p_tp - l_tp, s1_tp = 2.0 * p_tp - h_tp, r2_tp = p_tp + (h_tp - l_tp), s2_tp = p_tp - (h_tp - l_tp), r3_tp = h_tp + 2.0 * (p_tp - l_tp), s3_tp = l_tp - 2.0 * (h_tp - p_tp);
 
-                // ★★★ 新ロジック ★★★
-                // 基準となる価格を決定（ポジションがあればその建値、なければ現在値）
                 double current_price = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
                 double buy_ref_price = buyGroup.isActive ? buyGroup.averageEntryPrice : current_price;
                 double sell_ref_price = sellGroup.isActive ? sellGroup.averageEntryPrice : current_price;
 
-                // 【BUYサイドのTP】基準価格より上にある、最も近いレジスタンスを探す
-                double resistances[] = {r1, r2, r3};
+                double resistances[] = {r1_tp, r2_tp, r3_tp};
                 double closest_r = 0;
-                for(int i=0; i<ArraySize(resistances); i++)
-                {
-                    if(resistances[i] > buy_ref_price)
-                    {
-                        if(closest_r == 0 || resistances[i] < closest_r)
-                        {
-                            closest_r = resistances[i];
-                        }
-                    }
-                }
+                for(int i=0; i<ArraySize(resistances); i++){ if(resistances[i] > buy_ref_price){ if(closest_r == 0 || resistances[i] < closest_r){ closest_r = resistances[i]; }}}
                 new_buy_tp = closest_r;
 
-                // 【SELLサイドのTP】基準価格より下にある、最も近いサポートを探す
-                double supports[] = {s1, s2, s3};
+                double supports[] = {s1_tp, s2_tp, s3_tp};
                 double closest_s = 0;
-                for(int i=0; i<ArraySize(supports); i++)
-                {
-                    if(supports[i] < sell_ref_price && supports[i] > 0)
-                    {
-                        if(closest_s == 0 || supports[i] > closest_s)
-                        {
-                            closest_s = supports[i];
-                        }
-                    }
-                }
+                for(int i=0; i<ArraySize(supports); i++){ if(supports[i] < sell_ref_price && supports[i] > 0){ if(closest_s == 0 || supports[i] > closest_s){ closest_s = supports[i]; }}}
                 new_sell_tp = closest_s;
             }
             break;
         }
     }
     
-    // --- 2. 最終的なTP価格を決定し、ラインを描画 ---
     if (!isBuyTPManuallyMoved){ if (new_buy_tp > 0){ double final_buy_tp = new_buy_tp; if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High){ double originalDiff = final_buy_tp - buyGroup.averageEntryPrice; if (originalDiff > 0) final_buy_tp = buyGroup.averageEntryPrice + (originalDiff * InpHighSchoreTpRratio); } zonalFinalTPLine_Buy = final_buy_tp; } }
     if (zonalFinalTPLine_Buy > 0){ string name = "TPLine_Buy"; if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0); ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy); ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2); ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true); ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); }
     if (!isSellTPManuallyMoved){ if (new_sell_tp > 0){ double final_sell_tp = new_sell_tp; if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High){ double originalDiff = sellGroup.averageEntryPrice - final_sell_tp; if (originalDiff > 0) final_sell_tp = sellGroup.averageEntryPrice - (originalDiff * InpHighSchoreTpRratio); } zonalFinalTPLine_Sell = final_sell_tp; } }
@@ -1090,18 +1059,16 @@ bool ExecuteGroupSplitExit(PositionGroup &group, double lotToClose)
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す                                             |
+//| 新規エントリーを探す (ポジション間隔フィルター付き)                |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
-    for(int i = 0; i < ArraySize(allLines); i++)
-    {
-        CheckLineSignals(allLines[i]);
-    }
-    MqlRates rates[];
-    ArraySetAsSeries(rates, true);
+    for(int i = 0; i < ArraySize(allLines); i++){ CheckLineSignals(allLines[i]); }
+
+    MqlRates rates[]; ArraySetAsSeries(rates, true);
     if(CopyRates(_Symbol, PERIOD_M5, 0, 1, rates) < 1) return;
     datetime currentTime = rates[0].time;
+
     bool hasBuySignal = false, hasSellSignal = false;
     for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--)
     {
@@ -1112,43 +1079,59 @@ void CheckEntry()
         if(StringFind(name, "_Buy") > 0) hasBuySignal = true;
         if(StringFind(name, "_Sell") > 0) hasSellSignal = true;
     }
+
     if((hasBuySignal || hasSellSignal) && (TimeCurrent() > lastTradeTime + 5))
     {
-        if(InpEnableTimeFilter)
-        {
-            MqlDateTime time;
-            TimeCurrent(time);
-            int h = time.hour;
-            bool outside = false;
-            if(InpTradingHourStart > InpTradingHourEnd)
-            {
-                if(h < InpTradingHourStart && h >= InpTradingHourEnd) outside = true;
-            }
-            else
-            {
-                if(h < InpTradingHourStart || h >= InpTradingHourEnd) outside = true;
-            }
-            if(outside) return;
-        }
-        if(InpEnableVolatilityFilter)
-        {
-            double atr_buffer[100];
-            if(CopyBuffer(h_atr, 0, 0, 100, atr_buffer) == 100)
-            {
-                double avg_atr = 0;
-                for(int j = 0; j < 100; j++) avg_atr += atr_buffer[j];
-                if(atr_buffer[0] > (avg_atr / 100) * InpAtrMaxRatio) return;
-            }
-        }
+        if(InpEnableTimeFilter){ MqlDateTime time; TimeCurrent(time); int h = time.hour; bool outside = false; if(InpTradingHourStart > InpTradingHourEnd){ if(h < InpTradingHourStart && h >= InpTradingHourEnd) outside = true; } else { if(h < InpTradingHourStart || h >= InpTradingHourEnd) outside = true; } if(outside) return; }
+        if(InpEnableVolatilityFilter){ double atr_buffer[100]; if(CopyBuffer(h_atr, 0, 0, 100, atr_buffer) == 100){ double avg_atr = 0; for(int j = 0; j < 100; j++) avg_atr += atr_buffer[j]; if(atr_buffer[0] > (avg_atr / 100) * InpAtrMaxRatio) return; } }
+
         MqlTick tick;
         if(!SymbolInfoTick(_Symbol, tick)) return;
+
         if(hasBuySignal && buyGroup.positionCount < InpMaxPositions)
         {
+            if(InpEnableEntrySpacing && buyGroup.isActive)
+            {
+                datetime lastOpenTime = 0; double lastOpenPrice = 0;
+                for(int i = 0; i < buyGroup.positionCount; i++)
+                {
+                    if(PositionSelectByTicket(buyGroup.positionTickets[i]))
+                    {
+                        // ★★★ 修正点: POSITION_TIME_OPEN -> POSITION_TIME ★★★
+                        datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+                        if(openTime > lastOpenTime)
+                        {
+                            lastOpenTime = openTime;
+                            lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                        }
+                    }
+                }
+                if(lastOpenPrice > 0 && (tick.ask - lastOpenPrice) <= InpEntrySpacingPips * g_pip) return;
+            }
             ScoreComponentInfo info = CalculateMACDScore(true);
             if(info.total_score >= InpScore_Standard) PlaceOrder(true, tick.ask, info.total_score);
         }
+        
         if(hasSellSignal && sellGroup.positionCount < InpMaxPositions)
         {
+            if(InpEnableEntrySpacing && sellGroup.isActive)
+            {
+                datetime lastOpenTime = 0; double lastOpenPrice = 0;
+                for(int i = 0; i < sellGroup.positionCount; i++)
+                {
+                    if(PositionSelectByTicket(sellGroup.positionTickets[i]))
+                    {
+                        // ★★★ 修正点: POSITION_TIME_OPEN -> POSITION_TIME ★★★
+                        datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+                        if(openTime > lastOpenTime)
+                        {
+                            lastOpenTime = openTime;
+                            lastOpenPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+                        }
+                    }
+                }
+                if(lastOpenPrice > 0 && (lastOpenPrice - tick.bid) <= InpEntrySpacingPips * g_pip) return;
+            }
             ScoreComponentInfo info = CalculateMACDScore(false);
             if(info.total_score >= InpScore_Standard) PlaceOrder(false, tick.bid, info.total_score);
         }

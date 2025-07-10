@@ -219,6 +219,7 @@ input int                InpZigzagDeviation      = 5;              // ZigZag: De
 input int                InpZigzagBackstep       = 3;              // ZigZag: Backstep
 
 input group "=== ピボットライン設定 ===";
+input int             InpPivotHistoryCount    = 1;          // 表示する過去ピボットの数 (0=現在のみ)
 input ENUM_TIMEFRAMES InpPivotPeriod          = PERIOD_H1;    // ピボット時間足
 input bool            InpShowS2R2             = true;         // S2/R2ラインを表示
 input bool            InpShowS3R3             = true;         // S3/R3ラインを表示
@@ -271,6 +272,7 @@ double       zonalFinalTPLine_Buy, zonalFinalTPLine_Sell;
 bool         isBuyTPManuallyMoved = false, isSellTPManuallyMoved = false;
 datetime     lastTradeTime;
 bool         g_ignoreNextChartClick = false;
+datetime    g_lastPivotDrawTime = 0; // ピボットを最後に描画した時間足を記憶
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -346,49 +348,90 @@ void UpdateAllVisuals()
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】ピボットラインを再描画する堅牢な関数                     |
-//| (古いラインを全て削除し、現在のラインのみを描画する)             |
+//| 【括弧修正・最終完成版】ピボット管理関数                         |
 //+------------------------------------------------------------------+
-void RedrawPivotLines()
+void ManagePivotLines()
 {
-    // 1. まず、既存のピボットラインをすべて削除してクリーンな状態にする
+    // まず、既存のピボットラインをすべて削除
     ObjectsDeleteAll(0, InpLinePrefix_Pivot);
 
-    // 2. パラメータで無効化されている場合は、ここで処理を終了
-    if (!InpUsePivotLines)
+    // パラメータで無効なら、ここで処理を終了
+    if (!InpUsePivotLines) return;
+
+    long periodSeconds = PeriodSeconds(InpPivotPeriod);
+
+    // 統一されたループ（i=0が現在, i>0が過去）
+    for(int i = InpPivotHistoryCount; i >= 0; i--)
     {
-        return;
-    }
+        MqlRates rates[];
+        // i=0(現在)の時は、一つ前の足(index=1)から計算
+        // i=1(過去)の時は、二つ前の足(index=2)から計算...
+        if(CopyRates(_Symbol, InpPivotPeriod, i + 1, 1, rates) < 1) continue;
 
-    // 3. 最新のピボット値を計算
-    CalculatePivot();
-
-    // 4. シンプルな横線(OBJ_HLINE)として現在のピボットラインを描画
-    double p_prices[] = {s1, r1, s2, r2, s3, r3};
-    color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
-    string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
-
-    for(int i = 0; i < 6; i++)
-    {
-        if (i >= 2 && !InpShowS2R2) continue;
-        if (i >= 4 && !InpShowS3R3) continue;
-        if (p_prices[i] <= 0) continue; // 不正な価格は描画しない
-
-        string name = InpLinePrefix_Pivot + p_names[i];
-
-        if (ObjectCreate(0, name, OBJ_HLINE, 0, 0, p_prices[i]))
+        double h = rates[0].high;
+        double l = rates[0].low;
+        double c = rates[0].close;
+        
+        // ローカル変数名を変更し、グローバル変数との衝突を回避
+        double p_val = (h + l + c) / 3.0;
+        double s1_val = 2.0 * p_val - h;
+        double r1_val = 2.0 * p_val - l;
+        double s2_val = s1_val - (r1_val - s1_val);
+        double r2_val = r1_val + (r1_val - s1_val);
+        double s3_val = s2_val - (r2_val - s2_val);
+        double r3_val = r2_val + (r2_val - s2_val);
+        
+        // i=0（現在）の場合のみ、計算結果をグローバル変数に反映させる
+        if(i == 0)
         {
-            ObjectSetInteger(0, name, OBJPROP_COLOR, p_colors[i]);
-            ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
-            ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
-            ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false); // 選択不可に
-            ObjectSetInteger(0, name, OBJPROP_BACK, true);       // 背面に表示
+            pivot = p_val;
+            s1 = s1_val; r1 = r1_val;
+            s2 = s2_val; r2 = r2_val;
+            s3 = s3_val; r3 = r3_val;
+        }
+
+        datetime lineTime = iTime(_Symbol, InpPivotPeriod, i);
+        ENUM_LINE_STYLE style = (i == 0) ? STYLE_SOLID : STYLE_DOT;
+        bool rayRight = (i == 0);
+
+        double p_prices[] = {s1_val, r1_val, s2_val, r2_val, s3_val, r3_val};
+        color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
+        string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
+
+        for(int j = 0; j < 6; j++)
+        {
+            if (j >= 2 && !InpShowS2R2) continue;
+            if (j >= 4 && !InpShowS3R3) continue;
+            if (p_prices[j] <= 0) continue;
+
+            string name = InpLinePrefix_Pivot + p_names[j] + "_" + IntegerToString(lineTime);
+            
+            datetime startTime = lineTime;
+            datetime endTime;
+
+            if(rayRight) {
+                // 現在ラインの場合：1期間分の短い線分を定義し、そこから右に延長させる
+                endTime = startTime + periodSeconds;
+            } else {
+                // 過去ラインの場合：期間の終わりきっかりで描画を止める
+                endTime = startTime + periodSeconds - 1;
+            }
+
+            if (ObjectCreate(0, name, OBJ_TREND, 0, startTime, p_prices[j], endTime, p_prices[j]))
+            {
+                ObjectSetInteger(0, name, OBJPROP_COLOR, p_colors[j]);
+                ObjectSetInteger(0, name, OBJPROP_STYLE, style);
+                ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+                ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+                ObjectSetInteger(0, name, OBJPROP_BACK, true);
+                ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, rayRight);
+            }
         }
     }
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (最終安定版 v2)                           |
+//| エキスパート初期化関数 (最終アーキテクチャ版)                    |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -396,6 +439,7 @@ int OnInit()
     lastBar[0] = 0;
     lastBar[1] = 0;
     lastTradeTime = 0;
+    g_lastPivotDrawTime = 0; 
 
     h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
@@ -408,27 +452,15 @@ int OnInit()
         Print("インジケータハンドルの作成に失敗しました。");
         return(INIT_FAILED);
     }
-
-    if (InpPositionMode == MODE_AGGREGATE)
-    {
-        InitGroup(buyGroup, true);
-        InitGroup(sellGroup, false);
-    }
-    else
-    {
-        ArrayResize(splitPositions, 0);
-    }
-
-    // ★★★ 修正箇所 ★★★
-    // パラメータ変更時に手動TPフラグをリセットし、必ずデフォルトTPが描画されるようにする
+    
+    if (InpPositionMode == MODE_AGGREGATE) { InitGroup(buyGroup, true); InitGroup(sellGroup, false); }
+    else { ArrayResize(splitPositions, 0); }
     isBuyTPManuallyMoved = false;
     isSellTPManuallyMoved = false;
-
+    
     if(InpEnableButtons)
     {
-        CreateManualLineButton();
-        CreateClearButton();
-        CreateClearLinesButton();
+        CreateManualLineButton(); CreateClearButton(); CreateClearLinesButton();
         CreateApexButton(BUTTON_BUY_CLOSE_ALL, 140, 50, 100, 20, "BUY 全決済", clrDodgerBlue);
         CreateApexButton(BUTTON_SELL_CLOSE_ALL, 140, 75, 100, 20, "SELL 全決済", clrTomato);
         CreateApexButton(BUTTON_ALL_CLOSE, 245, 50, 100, 20, "全決済", clrGray);
@@ -437,21 +469,8 @@ int OnInit()
     }
 
     ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
-
-    // === 初期描画処理 ===
-    SyncManagedPositions();
-    UpdateLines();
-    RedrawPivotLines();
-    UpdateZones();
-    if (InpPositionMode == MODE_AGGREGATE)
-    {
-        ManagePositionGroups();
-    }
-    ManageInfoPanel();
-
-    ChartRedraw();
     
-    Print("ApexFlowEA v4.0 初期化完了 (最終安定版 v2)");
+    Print("ApexFlowEA v4.0 初期化完了 (最終アーキテクチャ版)");
     return(INIT_SUCCEEDED);
 }
 
@@ -502,36 +521,28 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (最終安定版)                            |
+//| エキスパートティック関数 (最終アーキテクチャ版)                  |
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    // ピボットの時間足が更新されたら、ピボットラインと内部データを更新
-    if(IsNewBar(InpPivotPeriod))
-    {
-        UpdateLines();      // 内部データ更新
-        RedrawPivotLines(); // ピボット再描画
-    }
-    
-    // M5の足が更新されたら、主要ロジックを実行
     if(IsNewBar(PERIOD_M5))
     {
-        SyncManagedPositions();
+        datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
+        if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
+        {
+            ManagePivotLines();
+            UpdateLines();
+            g_lastPivotDrawTime = currentPivotBarTime;
+        }
 
-        // TPライン、分割ライン、情報パネルを更新
-        UpdateZones();
-        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); }
-        else { DetectNewEntrances(); }
+        SyncManagedPositions(); UpdateZones();
+        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } else { DetectNewEntrances(); }
         ManageInfoPanel();
         
-        // 決済とエントリーロジック
-        if (InpPositionMode == MODE_AGGREGATE) { CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup); }
-        else { CheckExits(); }
+        if (InpPositionMode == MODE_AGGREGATE) { CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup); } else { CheckExits(); }
         CheckEntry();
         
-        // 手動ライン管理
         ManageManualLines();
-        
         ChartRedraw();
     }
 }
@@ -1999,3 +2010,4 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
     }
     return false;
 }
+

@@ -212,8 +212,11 @@ input bool               InpEnableDynamicSplits  = true;           // スコア�
 input int                InpHighScoreSplit_Add   = 3;              // 高スコア時に追加する分割数
 input double             InpExitBufferPips       = 1.0;            // 決済バッファ (Pips)
 input int                InpBreakEvenAfterSplits = 2;              // N回分割決済後にBE設定 (0=無効)
+input bool     InpEnableProfitBE       = true;                     // 利益確保型BEを有効にする
+input double   InpProfitBE_Pips        = 2.0;                      // 利益確保BEの幅 (pips)
 input double             InpHighSchoreTpRratio   = 1.5;            // 高スコア時のTP倍率
 input ENUM_TP_MODE       InpTPLineMode           = MODE_ZIGZAG;    // TPラインのモード
+input ENUM_TIMEFRAMES   InpTP_Timeframe       = PERIOD_H4;         // TP計算用の時間足 (ZigZagとPivotで共用)
 input int                InpZigzagDepth          = 12;             // ZigZag: Depth
 input int                InpZigzagDeviation      = 5;              // ZigZag: Deviation
 input int                InpZigzagBackstep       = 3;              // ZigZag: Backstep
@@ -445,8 +448,7 @@ int OnInit()
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
     h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
-    zigzagHandle = iCustom(_Symbol, _Period, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-
+    zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
     if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE)
     {
         Print("インジケータハンドルの作成に失敗しました。");
@@ -788,79 +790,143 @@ void ManagePositionGroups()
 
 
 //+------------------------------------------------------------------+
-//| 【置換】ZigZagに基づくTPラインを更新する (最終安定版 v2)         |
+//| 独立したTP時間足で計算するUpdateZones (最終版)                   |
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
-    // 1. ZigZagレベルを計算
-    double zigzag[];
-    ArraySetAsSeries(zigzag, true);
-    if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) <= 0) return;
-    
-    double levelHigh = 0, levelLow = DBL_MAX;
-    for(int i = 0; i < 100; i++)
-    {
-        if(zigzag[i] > 0)
-        {
-            if(zigzag[i] > levelHigh) levelHigh = zigzag[i];
-            if(zigzag[i] < levelLow) levelLow = zigzag[i];
-        }
-    }
+    double new_buy_tp = 0;
+    double new_sell_tp = 0;
 
-    // 2. BUYサイドのTP価格を決定
-    double targetBuyTP = zonalFinalTPLine_Buy;
-    if (!isBuyTPManuallyMoved) // 手動で動かされていない場合のみ、ZigZagに基づいて更新
+    // --- 1. 選択されたモードに応じてTP価格を計算 ---
+    switch(InpTPLineMode)
     {
-        targetBuyTP = (levelHigh > 0) ? levelHigh : 0;
-        // 高スコアポジションがある場合は、TPを拡張
-        if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High && targetBuyTP > 0)
+        // --- A) ZigZagモードのロジック ---
+        case MODE_ZIGZAG:
         {
-            double entryPrice = buyGroup.averageEntryPrice;
-            double originalDiff = targetBuyTP - entryPrice;
-            if (originalDiff > 0) targetBuyTP = entryPrice + (originalDiff * InpHighSchoreTpRratio);
+            // InpTP_Timeframeで初期化されたzigzagHandleを使用
+            double zigzag[];
+            ArraySetAsSeries(zigzag, true);
+            if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0)
+            {
+                double levelHigh = 0, levelLow = DBL_MAX;
+                for(int i = 0; i < 100; i++)
+                {
+                    if(zigzag[i] > 0)
+                    {
+                        if(zigzag[i] > levelHigh) levelHigh = zigzag[i];
+                        if(zigzag[i] < levelLow) levelLow = zigzag[i];
+                    }
+                }
+                new_buy_tp = levelHigh;
+                new_sell_tp = (levelLow < DBL_MAX) ? levelLow : 0;
+            }
+            break;
+        }
+
+        // --- B) ピボットモードのロジック (TP専用時間足で計算) ---
+        case MODE_PIVOT:
+        {
+            MqlRates rates[];
+            // InpTP_Timeframe の一つ前の足からデータを取得してピボットを計算
+            if(CopyRates(_Symbol, InpTP_Timeframe, 1, 1, rates) > 0)
+            {
+                double h = rates[0].high;
+                double l = rates[0].low;
+                double c = rates[0].close;
+                double p = (h + l + c) / 3.0;
+                double r1 = 2.0 * p - l;
+                double s1 = 2.0 * p - h;
+                double r2 = p + (h - l);
+                double s2 = p - (h - l);
+                double r3 = h + 2.0 * (p - l);
+                double s3 = l - 2.0 * (h - p);
+
+                // BUYポジションのTP = 最も近いレジスタンスライン
+                if (buyGroup.isActive)
+                {
+                    double resistances[] = {r1, r2, r3};
+                    double closest_r = 0;
+                    for(int i=0; i<ArraySize(resistances); i++)
+                    {
+                        if(resistances[i] > buyGroup.averageEntryPrice)
+                        {
+                            if(closest_r == 0 || resistances[i] < closest_r)
+                            {
+                                closest_r = resistances[i];
+                            }
+                        }
+                    }
+                    new_buy_tp = closest_r;
+                }
+                // SELLポジションのTP = 最も近いサポートライン
+                if (sellGroup.isActive)
+                {
+                    double supports[] = {s1, s2, s3};
+                    double closest_s = 0;
+                    for(int i=0; i<ArraySize(supports); i++)
+                    {
+                        if(supports[i] < sellGroup.averageEntryPrice)
+                        {
+                            if(closest_s == 0 || supports[i] > closest_s)
+                            {
+                                closest_s = supports[i];
+                            }
+                        }
+                    }
+                    new_sell_tp = closest_s;
+                }
+            }
+            break;
         }
     }
     
-    // 3. BUYサイドのTPラインを描画・更新
-    if (targetBuyTP > 0)
+    // --- 2. 最終的なTP価格を決定し、ラインを描画（この部分は変更なし）---
+    if (!isBuyTPManuallyMoved)
     {
-        zonalFinalTPLine_Buy = targetBuyTP; // グローバル変数を更新
+        if (new_buy_tp > 0)
+        {
+            double final_buy_tp = new_buy_tp;
+            if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High)
+            {
+                 double originalDiff = final_buy_tp - buyGroup.averageEntryPrice;
+                 if (originalDiff > 0) final_buy_tp = buyGroup.averageEntryPrice + (originalDiff * InpHighSchoreTpRratio);
+            }
+            zonalFinalTPLine_Buy = final_buy_tp;
+        }
+    }
+    if (zonalFinalTPLine_Buy > 0)
+    {
         string name = "TPLine_Buy";
         if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
-        
         ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy);
         ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold);
         ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-        ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); // 手動なら実線、自動なら点線
+        ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT);
         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
         ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
     }
 
-    // 4. SELLサイドのTP価格を決定
-    double targetSellTP = zonalFinalTPLine_Sell;
-    if (!isSellTPManuallyMoved) // 手動で動かされていない場合のみ、ZigZagに基づいて更新
+    if (!isSellTPManuallyMoved)
     {
-        targetSellTP = (levelLow < DBL_MAX) ? levelLow : 0;
-        // 高スコアポジションがある場合は、TPを拡張
-        if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High && targetSellTP > 0)
+        if (new_sell_tp > 0)
         {
-            double entryPrice = sellGroup.averageEntryPrice;
-            double originalDiff = entryPrice - targetSellTP;
-            if (originalDiff > 0) targetSellTP = entryPrice - (originalDiff * InpHighSchoreTpRratio);
+            double final_sell_tp = new_sell_tp;
+             if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High)
+             {
+                 double originalDiff = sellGroup.averageEntryPrice - final_sell_tp;
+                 if (originalDiff > 0) final_sell_tp = sellGroup.averageEntryPrice - (originalDiff * InpHighSchoreTpRratio);
+             }
+            zonalFinalTPLine_Sell = final_sell_tp;
         }
     }
-
-    // 5. SELLサイドのTPラインを描画・更新
-    if (targetSellTP > 0)
+    if (zonalFinalTPLine_Sell > 0)
     {
-        zonalFinalTPLine_Sell = targetSellTP; // グローバル変数を更新
         string name = "TPLine_Sell";
         if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
-
         ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell);
         ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple);
         ObjectSetInteger(0, name, OBJPROP_WIDTH, 2);
-        ObjectSetInteger(0, name, OBJPROP_STYLE, isSellTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); // 手動なら実線、自動なら点線
+        ObjectSetInteger(0, name, OBJPROP_STYLE, isSellTPManuallyMoved ? STYLE_SOLID : STYLE_DOT);
         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
         ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
     }
@@ -1596,29 +1662,55 @@ void SetBreakEvenForGroup(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| 指定されたポジションのSLを設定する                               |
+//| 指定されたポジションのSLを設定する (利益確保機能付き)            |
 //+------------------------------------------------------------------+
 bool SetBreakEven(ulong ticket, double entryPrice)
 {
     MqlTradeRequest req;
     MqlTradeResult res;
     ZeroMemory(req);
+
     if(PositionSelectByTicket(ticket))
     {
+        // --- 新しいSL価格を計算 ---
+        double newSL = entryPrice; // デフォルトは建値
+        
+        // 利益確保BEが有効な場合、指定pipsを加算/減算
+        if(InpEnableProfitBE)
+        {
+            double profit_in_points = InpProfitBE_Pips * g_pip;
+            ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+            if(pos_type == POSITION_TYPE_BUY)
+            {
+                newSL = entryPrice + profit_in_points;
+            }
+            else // POSITION_TYPE_SELL
+            {
+                newSL = entryPrice - profit_in_points;
+            }
+        }
+        // --- 計算ここまで ---
+
+        // 既にSLが設定済みの場合は何もしない
         double currentSL = PositionGetDouble(POSITION_SL);
-        if(MathAbs(currentSL - entryPrice) < g_pip)
+        if(MathAbs(currentSL - newSL) < g_pip)
         {
             return true;
         }
+
         req.action = TRADE_ACTION_SLTP;
         req.position = ticket;
         req.symbol = _Symbol;
-        req.sl = NormalizeDouble(entryPrice, _Digits);
+        req.sl = NormalizeDouble(newSL, _Digits);
         req.tp = PositionGetDouble(POSITION_TP);
+        
+        // ストップレベルの内側に入ってしまう場合は、エラーを防ぐため設定をスキップ
         double stops_level = (double)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL) * g_pip;
         double current_bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
         double current_ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
         ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
         if(pos_type == POSITION_TYPE_BUY && req.sl >= current_bid - stops_level)
         {
             PrintFormat("BE設定スキップ(BUY): SL(%f)がストップレベル(%f)の内側です。", req.sl, current_bid - stops_level);
@@ -1629,11 +1721,14 @@ bool SetBreakEven(ulong ticket, double entryPrice)
             PrintFormat("BE設定スキップ(SELL): SL(%f)がストップレベル(%f)の内側です。", req.sl, current_ask + stops_level);
             return false;
         }
+
         if(!OrderSend(req, res))
         {
             PrintFormat("SetBreakEven OrderSend Error: %d", GetLastError());
             return false;
         }
+        
+        PrintFormat("ポジション #%d のSLを %f に設定しました (利益確保BE)。", ticket, newSL);
         return true;
     }
     return false;

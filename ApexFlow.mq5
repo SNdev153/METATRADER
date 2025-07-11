@@ -182,32 +182,45 @@ input double   InpEntrySpacingPips   = 10.0;             // 最低限確保す�
 input int            InpMagicNumber          = 123456;   // マジックナンバー
 input int            InpDotTimeout           = 600;      // ドット/矢印有効期限 (秒)
 
-input group "=== ロット・リスク管理 ===";
-
-
 input group "=== ストップロス設定 ===";
 input bool          InpEnableAtrSL     = true;        // ATRストップロスを有効にする
 input double        InpAtrSlMultiplier = 2.5;         // ATRの倍率 (例: 2.5 = ATRの2.5倍)
 input ENUM_TIMEFRAMES InpAtrSlTimeframe = PERIOD_H1;   // SL計算に使用するATRの時間足
+input bool          InpEnableTrailingSL       = true;        // ★★★追加: ATRトレーリングストップを有効にする
+input double        InpTrailingAtrMultiplier  = 2.0;         // ★★★追加: トレーリングSLのATR倍率
+
+input group "=== 動的決済ロジック ===";
+input bool      InpEnableTimeExit          = true;    // タイム・エグジット（時間経過による決済）を有効にする
+input int       InpExitAfterBars           = 48;      // 何本経過したら決済判断を行うか (M5で48本 = 4時間)
+input double    InpExitMinProfit           = 1.0;     // この利益額(口座通貨)に達していない場合、時間で決済される
+input bool      InpEnableCounterSignalExit = true;    // カウンターシグナル（反対サイン）による決済を有効にする
+input int       InpCounterSignalScore      = 7;       // 決済のトリガーとなる反対シグナルの最低スコア
 
 input group "=== 決済ロジック設定 (Zephyr) ===";
-input ENUM_POSITION_MODE InpPositionMode         = MODE_AGGREGATE; // ポジション管理モード
-input ENUM_EXIT_LOGIC    InpExitLogic            = EXIT_UNFAVORABLE; // 分割決済のロジック
-input int                InpSplitCount           = 5;              // 分割決済の回数
-input bool               InpEnableDynamicSplits  = true;           // スコアで分割数を増やす
-input int                InpHighScoreSplit_Add   = 3;              // 高スコア時に追加する分割数
-input double             InpExitBufferPips       = 1.0;            // 決済バッファ (Pips)
-input int                InpBreakEvenAfterSplits = 2;              // N回分割決済後にBE設定 (0=無効)
-input bool     InpEnableProfitBE       = true;                     // 利益確保型BEを有効にする
-input double   InpProfitBE_Pips        = 2.0;                      // 利益確保BEの幅 (pips)
-input double             InpHighSchoreTpRratio   = 1.5;            // 高スコア時のTP倍率
-input ENUM_TP_MODE       InpTPLineMode           = MODE_ZIGZAG;    // TPラインのモード
-input ENUM_TIMEFRAMES   InpTP_Timeframe       = PERIOD_H4;         // TP計算用の時間足 (ZigZagとPivotで共用)
-input int                InpZigzagDepth          = 12;             // ZigZag: Depth
-input int                InpZigzagDeviation      = 5;              // ZigZag: Deviation
-input int                InpZigzagBackstep       = 3;              // ZigZag: Backstep
-input bool                InpEnablePartialCloseEven = true;        // [新機能] パーシャルクローズイーブンを有効にする
-input double              InpPartialCloseEvenProfit = 1.0;         // [新機能] 決済を実行する合計利益額 (0以上)
+input ENUM_POSITION_MODE InpPositionMode           = MODE_AGGREGATE; // ポジション管理モード
+input ENUM_EXIT_LOGIC    InpExitLogic              = EXIT_UNFAVORABLE; // 分割決済のロジック
+input int                InpSplitCount             = 5;              // 分割決済の回数
+input double             InpFinalTpRR_Ratio        = 2.5;            // ★★★追加: 最終TPのRR比 (例: 2.5 = SL値幅の2.5倍を最終TPとする)
+input bool               InpEnableDynamicSplits    = true;           // スコアで分割数を増やす
+input int                InpHighScoreSplit_Add     = 3;              // 高スコア時に追加する分割数
+input double             InpExitBufferPips         = 1.0;            // 決済バッファ (Pips)
+input int                InpBreakEvenAfterSplits   = 2;              // N回分割決済後にBE設定 (0=無効)
+input bool               InpEnableProfitBE         = true;           // 利益確保型BEを有効にする
+input double             InpProfitBE_Pips          = 2.0;            // 利益確保BEの幅 (pips)
+input double             InpHighSchoreTpRratio     = 1.5;            // 高スコア時のTP倍率
+input ENUM_TP_MODE       InpTPLineMode             = MODE_ZIGZAG;    // TPラインのモード
+input ENUM_TIMEFRAMES    InpTP_Timeframe           = PERIOD_H4;      // TP計算用の時間足 (ZigZagとPivotで共用)
+input int                InpZigzagDepth            = 12;             // ZigZag: Depth
+input int                InpZigzagDeviation        = 5;              // ZigZag: Deviation
+input int                InpZigzagBackstep         = 3;              // ZigZag: Backstep
+input bool               InpEnablePartialCloseEven = true;           // [新機能] パーシャルクローズイーブンを有効にする
+input double             InpPartialCloseEvenProfit = 1.0;            // [新機能] 決済を実行する合計利益額 (0以上)
+
+input group "=== トレンド強度フィルター (ADX) ===";
+input bool          InpEnableAdxFilter = true;        // ADXフィルターを有効にする
+input ENUM_TIMEFRAMES InpAdxTimeframe    = PERIOD_H1;   // ADXの時間足
+input int           InpAdxPeriod       = 14;          // ADXの期間
+input int           InpAdxThreshold    = 23;          // エントリーを許可するADXの最低値
 
 input group "--- 動的フィルター設定 ---";
 input bool           InpEnableVolatilityFilter = true;  // ボラティリティフィルターを有効にするか
@@ -225,24 +238,37 @@ input int            InpDivSymbolCode        = 159;           // サインのシ
 input int            InpDivSymbolSize        = 8;             // サインの大きさ
 input double         InpDivSymbolOffsetPips  = 15.0;          // サインの描画オフセット (Pips)
 
-input group "=== MACDスコアリング設定 ===";
-input int            InpScore_Standard       = 4;       // 標準エントリーの最低スコア
-input int            InpScore_High           = 6;       // 高スコアエントリーの最低スコア
+input group "=== 高度スコアリング設定 ===";
+input int    InpScore_Standard        = 6;        // 標準エントリーの最低スコア
+input int    InpScore_High            = 8;        // 高スコアエントリーの最低スコア
+input bool   InpEnableWeightedScoring = true;      // (2) 各スコアの「重み付け」を有効にする
+input double InpWeightDivergence      = 1.5;      // ダイバージェンスの重み
+input double InpWeightLongTrend       = 2.0;      // 長期トレンドの重み
+input double InpWeightMidTrend        = 1.2;      // 中期トレンドの重み
+input double InpWeightExecAngle       = 0.8;      // 執行足の角度の重み
+input double InpWeightMidAngle        = 1.0;      // 中期足の角度の重み
+input double InpWeightExecHist        = 0.8;      // 執行足のヒストグラムの重み
+input double InpWeightMidHist         = 1.0;      // 中期足のヒストグラムの重み
+input bool   InpEnableComboBonuses    = true;      // (3) 「コンボボーナス」を有効にする
+input int    InpBonusTrendAlignment   = 2;        // 長期＋中期トレンド一致時のボーナス点
+input int    InpBonusTrendDivergence  = 3;        // 長期トレンド＋ダイバージェンス一致時のボーナス点
+input bool   InpEnableSoftVeto        = true;      // (4) 「ソフトVeto（減点）」を有効にする
+input int    InpPenaltyCounterTrend   = -5;       // 長期トレンド逆行時の減点数 (必ずマイナス値を入力)
 
 input group "--- 執行足MACD (トリガー) ---";
-input ENUM_TIMEFRAMES InpMACD_TF_Exec        = PERIOD_CURRENT; // 時間足 (PERIOD_CURRENT=チャートの時間足)
+input ENUM_TIMEFRAMES InpMACD_TF_Exec         = PERIOD_CURRENT; // 時間足 (PERIOD_CURRENT=チャートの時間足)
 input int             InpMACD_Fast_Exec       = 12;             // Fast EMA
 input int             InpMACD_Slow_Exec       = 26;             // Slow EMA
 input int             InpMACD_Signal_Exec     = 9;              // Signal SMA
 
 input group "--- 中期足MACD (コンテキスト) ---";
-input ENUM_TIMEFRAMES InpMACD_TF_Mid         = PERIOD_H1;      // 時間足
+input ENUM_TIMEFRAMES InpMACD_TF_Mid          = PERIOD_H1;      // 時間足
 input int             InpMACD_Fast_Mid        = 12;             // Fast EMA
 input int             InpMACD_Slow_Mid        = 26;             // Slow EMA
 input int             InpMACD_Signal_Mid      = 9;              // Signal SMA
 
 input group "--- 長期足MACD (コンファメーション) ---";
-input ENUM_TIMEFRAMES InpMACD_TF_Long        = PERIOD_H4;      // 時間足
+input ENUM_TIMEFRAMES InpMACD_TF_Long         = PERIOD_H4;      // 時間足
 input int             InpMACD_Fast_Long       = 12;             // Fast EMA
 input int             InpMACD_Slow_Long       = 26;             // Slow EMA
 input int             InpMACD_Signal_Long     = 9;              // Signal SMA
@@ -299,6 +325,7 @@ Line         allLines[];
 PositionInfo g_managedPositions[];
 int          h_macd_exec, h_macd_mid, h_macd_long, h_atr;
 int         h_atr_sl;
+int         h_adx;            // ★★★ ADXインジケータハンドルを追加 ★★★
 datetime    g_lastBarTime = 0; // ★★★ lastBar[2] を廃止し、この変数に変更
 datetime     lastArrowTime = 0;
 bool         g_isDrawingMode = false;
@@ -476,7 +503,7 @@ void ManagePivotLines()
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (SL機能追加版)                            |
+//| エキスパート初期化関数 (ADXフィルター追加版)                     |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -490,11 +517,12 @@ int OnInit()
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
     h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
-    // ★★★ SL計算用のATRハンドルを新しく作成 ★★★
     h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
     zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
+    // ★★★ ADXハンドルの作成を追加 ★★★
+    h_adx = iADX(_Symbol, InpAdxTimeframe, InpAdxPeriod);
     
-    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE)
+    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_adx == INVALID_HANDLE)
     {
         Print("インジケータハンドルの作成に失敗しました。");
         return(INIT_FAILED);
@@ -520,7 +548,7 @@ int OnInit()
     prev_tp_mode = InpTPLineMode;
     prev_tp_timeframe = InpTP_Timeframe;
     
-    Print("ApexFlowEA v4.0 初期化完了 (ATR-SL機能搭載)");
+    Print("ApexFlowEA v4.0 初期化完了 (ADXフィルター搭載)");
     return(INIT_SUCCEEDED);
 }
 
@@ -571,7 +599,7 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (呼び出し順序 修正版)                   |
+//| エキスパートティック関数 (動的決済ロジック対応版)                |
 //+------------------------------------------------------------------+
 void OnTick()
 {
@@ -598,8 +626,7 @@ void OnTick()
             g_lastPivotDrawTime = currentPivotBarTime;
         }
 
-        // ★★★ 修正点：呼び出し順序を変更 ★★★
-        // 1. まずポジション状態を完全に更新する
+        // 1. ポジション状態を完全に更新する
         SyncManagedPositions(); 
         if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } 
         else { DetectNewEntrances(); }
@@ -609,12 +636,23 @@ void OnTick()
         ManageInfoPanel();
         
         // === 取引実行ブロック ===
-        // --- ↓↓↓ ここから下を修正 ↓↓↓ ---
-        CheckPartialCloseEven(); // ★★★ 新機能の呼び出しを追加 ★★★
-        if (InpPositionMode == MODE_AGGREGATE) { CheckExitForGroup(buyGroup); CheckExitForGroup(sellGroup); } 
-        else { CheckExits(); }
+        CheckPartialCloseEven();
+
+        // ★★★ 動的決済ロジックの呼び出しを追加 ★★★
+        CheckDynamicExits();
+
+        if (InpPositionMode == MODE_AGGREGATE) 
+        { 
+            CheckExitForGroup(buyGroup); 
+            CheckExitForGroup(sellGroup);
+            ManageTrailingSL(buyGroup);
+            ManageTrailingSL(sellGroup);
+        } 
+        else 
+        { 
+            CheckExits(); 
+        }
         CheckEntry();
-        // --- ↑↑↑ ここまでを修正 ↑↑↑ ---
         
         // === その他管理ブロック ===
         ManageManualLines();
@@ -725,7 +763,7 @@ void InitGroup(PositionGroup &group, bool isBuy)
 }
 
 //+------------------------------------------------------------------+
-//| ポジショングループの状態を更新する (SL更新機能追加版)              |
+//| ポジショングループの状態を更新する (最終決済ロジック版)          |
 //+------------------------------------------------------------------+
 void ManagePositionGroups()
 {
@@ -814,11 +852,33 @@ void ManagePositionGroups()
             {
                 buyGroup.lockedInSplitCount += InpHighScoreSplit_Add;
             }
+            // ★★★ ここから最終TPの計算ロジックを変更 ★★★
             if(!isBuyTPManuallyMoved)
             {
-                UpdateZones();
-                buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
+                // グループ内のポジションからSLを取得してSL値幅を計算
+                double sl_price = 0;
+                if(buyGroup.positionCount > 0 && PositionSelectByTicket(buyGroup.positionTickets[0]))
+                {
+                    sl_price = PositionGetDouble(POSITION_SL);
+                }
+                
+                if(sl_price > 0)
+                {
+                    double sl_distance = MathAbs(buyGroup.averageEntryPrice - sl_price);
+                    double final_tp = buyGroup.averageEntryPrice + (sl_distance * InpFinalTpRR_Ratio);
+                    // 高スコア倍率を適用
+                    if (buyGroup.highestScore >= InpScore_High)
+                    {
+                        final_tp = buyGroup.averageEntryPrice + (sl_distance * InpFinalTpRR_Ratio * InpHighSchoreTpRratio);
+                    }
+                    buyGroup.stampedFinalTP = final_tp;
+                } else {
+                    // SL未設定の場合は従来のロジックにフォールバック
+                    UpdateZones();
+                    buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
+                }
             }
+            // ★★★ ここまで ★★★
             buyGroup.openTime = buyEarliestTime;
         }
         else // 既存グループへの追加
@@ -830,7 +890,6 @@ void ManagePositionGroups()
             buyGroup.openTime = oldBuyGroup.openTime;
         }
 
-        // ★★★ グループのSLを更新する処理を呼び出し ★★★
         if(InpEnableAtrSL && oldBuyGroup.positionCount != buyGroup.positionCount)
         {
             UpdateGroupSL(buyGroup);
@@ -852,7 +911,7 @@ void ManagePositionGroups()
             sellGroup.averageScore = sellTotalScoreLot / sellGroup.totalLotSize;
         }
         sellGroup.positionCount = ArraySize(sellGroup.positionTickets);
-        if(!oldSellGroup.isActive) // 新規グループ結成
+        if(!oldSellGroup.isActive)
         {
             sellGroup.initialTotalLotSize = sellGroup.totalLotSize;
             sellGroup.splitsDone = 0;
@@ -861,14 +920,33 @@ void ManagePositionGroups()
             {
                 sellGroup.lockedInSplitCount += InpHighScoreSplit_Add;
             }
+            // ★★★ ここから最終TPの計算ロジックを変更 ★★★
             if(!isSellTPManuallyMoved)
             {
-                UpdateZones();
-                sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
+                double sl_price = 0;
+                if(sellGroup.positionCount > 0 && PositionSelectByTicket(sellGroup.positionTickets[0]))
+                {
+                    sl_price = PositionGetDouble(POSITION_SL);
+                }
+                
+                if(sl_price > 0)
+                {
+                    double sl_distance = MathAbs(sellGroup.averageEntryPrice - sl_price);
+                    double final_tp = sellGroup.averageEntryPrice - (sl_distance * InpFinalTpRR_Ratio);
+                    if (sellGroup.highestScore >= InpScore_High)
+                    {
+                         final_tp = sellGroup.averageEntryPrice - (sl_distance * InpFinalTpRR_Ratio * InpHighSchoreTpRratio);
+                    }
+                    sellGroup.stampedFinalTP = final_tp;
+                } else {
+                    UpdateZones();
+                    sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
+                }
             }
+            // ★★★ ここまで ★★★
             sellGroup.openTime = sellEarliestTime;
         }
-        else // 既存グループへの追加
+        else
         {
             sellGroup.initialTotalLotSize = oldSellGroup.initialTotalLotSize;
             sellGroup.splitsDone = oldSellGroup.splitsDone;
@@ -877,7 +955,6 @@ void ManagePositionGroups()
             sellGroup.openTime = oldSellGroup.openTime;
         }
         
-        // ★★★ グループのSLを更新する処理を呼び出し ★★★
         if(InpEnableAtrSL && oldSellGroup.positionCount != sellGroup.positionCount)
         {
             UpdateGroupSL(sellGroup);
@@ -1010,7 +1087,7 @@ void DeleteGroupSplitLines(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| グループの決済条件をチェックする (描画を即時反映する最終FIX版)   |
+//| グループの決済条件をチェックする (ロジック整理版)                |
 //+------------------------------------------------------------------+
 void CheckExitForGroup(PositionGroup &group)
 {
@@ -1072,11 +1149,8 @@ void CheckExitForGroup(PositionGroup &group)
                 
                 group.splitsDone++;
                 
-                // ★★★ ここから下を追記 ★★★
-                // 決済直後にライン描画を強制実行し、即時反映させる
                 UpdateGroupSplitLines(group);
                 ChartRedraw();
-                // ★★★ ここまでを追記 ★★★
                 
                 if(InpBreakEvenAfterSplits > 0 && group.splitsDone >= InpBreakEvenAfterSplits)
                 {
@@ -1132,7 +1206,7 @@ bool ExecuteSplitExit(ulong ticket, double lot, SplitData &split, int splitIndex
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す (シグナル検知ロジック修正版)                |
+//| 新規エントリーを探す (ADXフィルター追加版)                       |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -1141,38 +1215,30 @@ void CheckEntry()
 
     // --- ステージ2: エントリー実行確認 ---
     MqlRates rates[]; ArraySetAsSeries(rates, true);
-    if(CopyRates(_Symbol, PERIOD_M5, 0, 1, rates) < 1) return;
+    if(CopyRates(_Symbol, _Period, 0, 1, rates) < 1) return;
     datetime currentTime = rates[0].time;
 
-    // --- ★★★ ここからロジックを全面的に修正 ★★★ ---
     bool hasBuySignal = false;
     bool hasSellSignal = false;
 
-    // チャート上の全ての矢印オブジェクトをチェック
     for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--)
     {
         string name = ObjectName(0, i, -1, OBJ_ARROW);
-        // ブレイク（矢印）か反発（ドット）のどちらかのプレフィックスを持つか確認
         if(StringFind(name, InpArrowPrefix) != 0 && StringFind(name, InpDotPrefix) != 0) continue;
 
         datetime objTime = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME);
-        // 有効期限切れのシグナルは無視
         if(currentTime - objTime > InpDotTimeout) continue;
 
-        // シグナル名に "Buy" が含まれていれば買いシグナルと判断
         if(StringFind(name, "_Buy") > 0 || StringFind(name, "_Buy_") > 0)
         {
             hasBuySignal = true;
         }
-        // シグナル名に "Sell" が含まれていれば売りシグナルと判断
         if(StringFind(name, "_Sell") > 0 || StringFind(name, "_Sell_") > 0)
         {
             hasSellSignal = true;
         }
     }
-    // --- ★★★ ここまでロジックを全面的に修正 ★★★ ---
-
-
+    
     // エントリー候補のシグナルがあり、かつクールダウンタイムを過ぎている場合のみフィルターチェックへ
     if((hasBuySignal || hasSellSignal) && (TimeCurrent() > lastTradeTime + 5))
     {
@@ -1202,6 +1268,26 @@ void CheckEntry()
                 }
             }
         }
+        
+        // ★★★ ここからADXフィルターのロジック ★★★
+        if(InpEnableAdxFilter)
+        {
+            double adx_buffer[2];
+            if(CopyBuffer(h_adx, 0, 0, 2, adx_buffer) < 2)
+            {
+                Print("ADXフィルターエラー: ADX値の取得に失敗しました。");
+                return;
+            }
+            // 最新の確定足のADX値を使用
+            double current_adx = adx_buffer[1]; 
+            
+            if(current_adx < InpAdxThreshold)
+            {
+                PrintFormat("エントリースキップ (ADXフィルター): ADX値(%.2f)が閾値(%d)未満です。", current_adx, InpAdxThreshold);
+                return; // ADXが基準値より低い場合はエントリーしない
+            }
+        }
+        // ★★★ ここまで ★★★
 
         MqlTick tick;
         if(!SymbolInfoTick(_Symbol, tick)) return;
@@ -1209,7 +1295,7 @@ void CheckEntry()
         // --- BUYシグナルに対するフィルターチェック ---
         if(hasBuySignal)
         {
-            string reason = ""; // スキップ理由を格納する変数
+            string reason = "";
             if(buyGroup.positionCount >= InpMaxPositions)
             {
                 reason = "最大ポジション数(" + (string)buyGroup.positionCount + ")に到達";
@@ -1217,9 +1303,9 @@ void CheckEntry()
             else if(InpEnableEntrySpacing && buyGroup.isActive)
             {
                 datetime lastOpenTime = 0; double lastOpenPrice = 0;
-                for(int i = 0; i < buyGroup.positionCount; i++)
+                for(int j = 0; j < buyGroup.positionCount; j++)
                 {
-                    if(PositionSelectByTicket(buyGroup.positionTickets[i]))
+                    if(PositionSelectByTicket(buyGroup.positionTickets[j]))
                     {
                         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
                         if(openTime > lastOpenTime)
@@ -1235,11 +1321,11 @@ void CheckEntry()
                 }
             }
             
-            if(reason != "") // スキップ理由があればログ出力
+            if(reason != "")
             {
                 Print("エントリースキップ (BUY): " + reason);
             }
-            else // 全てのフィルターを通過した場合、最終スコアチェックへ
+            else
             {
                 ScoreComponentInfo info = CalculateMACDScore(true);
                 if(info.total_score >= InpScore_Standard)
@@ -1256,7 +1342,7 @@ void CheckEntry()
         // --- SELLシグナルに対するフィルターチェック ---
         if(hasSellSignal)
         {
-            string reason = ""; // スキップ理由を格納する変数
+            string reason = "";
             if(sellGroup.positionCount >= InpMaxPositions)
             {
                 reason = "最大ポジション数(" + (string)sellGroup.positionCount + ")に到達";
@@ -1264,9 +1350,9 @@ void CheckEntry()
             else if(InpEnableEntrySpacing && sellGroup.isActive)
             {
                 datetime lastOpenTime = 0; double lastOpenPrice = 0;
-                for(int i = 0; i < sellGroup.positionCount; i++)
+                for(int j = 0; j < sellGroup.positionCount; j++)
                 {
-                    if(PositionSelectByTicket(sellGroup.positionTickets[i]))
+                    if(PositionSelectByTicket(sellGroup.positionTickets[j]))
                     {
                         datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
                         if(openTime > lastOpenTime)
@@ -1282,11 +1368,11 @@ void CheckEntry()
                 }
             }
             
-            if(reason != "") // スキップ理由があればログ出力
+            if(reason != "")
             {
                 Print("エントリースキップ (SELL): " + reason);
             }
-            else // 全てのフィルターを通過した場合、最終スコアチェックへ
+            else
             {
                 ScoreComponentInfo info = CalculateMACDScore(false);
                 if(info.total_score >= InpScore_Standard)
@@ -1303,7 +1389,7 @@ void CheckEntry()
 }
 
 //+------------------------------------------------------------------+
-//| 注文を発注する (高スコアリスク対応版)                          |
+//| 注文を発注する (ロジック整理版)                                |
 //+------------------------------------------------------------------+
 void PlaceOrder(bool isBuy, double price, int score)
 {
@@ -1311,7 +1397,6 @@ void PlaceOrder(bool isBuy, double price, int score)
     double lot_size = 0.0;
     if(InpEnableRiskBasedLot)
     {
-        // ★★★ ロット計算にスコアを渡すよう変更 ★★★
         lot_size = CalculateRiskBasedLotSize(score);
     }
     else
@@ -1325,7 +1410,7 @@ void PlaceOrder(bool isBuy, double price, int score)
         return;
     }
 
-    // --- 注文リクエストの作成 ---
+    // --- 注文リクエストの作成 (TPは設定しない) ---
     MqlTradeRequest req;
     MqlTradeResult res;
     ZeroMemory(req);
@@ -1334,6 +1419,8 @@ void PlaceOrder(bool isBuy, double price, int score)
     req.volume = lot_size;
     req.type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
     req.price = NormalizeDouble(price, _Digits);
+    req.sl = 0; // SLは注文後に別途設定
+    req.tp = 0; // TPは分割決済ロジックが管理
     req.magic = InpMagicNumber;
     req.comment = (isBuy ? "Buy" : "Sell") + " (Score " + (string)score + ")";
     req.type_filling = ORDER_FILLING_IOC;
@@ -1359,7 +1446,7 @@ void PlaceOrder(bool isBuy, double price, int score)
                 ArrayResize(g_managedPositions, size + 1);
                 g_managedPositions[size] = newPos;
 
-                // --- ATR SLが有効なら、新規ポジションにSLを設定 ---
+                // ATR SLが有効なら、新規ポジションにSLを設定
                 if (InpEnableAtrSL)
                 {
                     double atr_buffer[1];
@@ -1379,7 +1466,7 @@ void PlaceOrder(bool isBuy, double price, int score)
                     }
                 }
 
-                // --- ポジション状態とUIを即時更新 ---
+                // ポジション状態とUIを即時更新
                 if (InpPositionMode == MODE_AGGREGATE)
                 {
                     ManagePositionGroups();
@@ -2244,27 +2331,23 @@ void AddPanelLine(string &lines[], const string text)
 }
 
 //+------------------------------------------------------------------+
-//| MACD指標に基づく取引スコアを計算 (スコア内訳記録版)              |
+//| MACDスコアを計算（高度スコアリングシステム実装版）               |
 //+------------------------------------------------------------------+
 ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
 {
     ScoreComponentInfo info;
-    ZeroMemory(info); // 構造体を0で初期化
+    ZeroMemory(info);
     
-    double exec_main[], exec_signal[];
-    double mid_main[], mid_signal[];
-    double long_main[];
-    ArraySetAsSeries(exec_main, true);
-    ArraySetAsSeries(exec_signal, true);
-    ArraySetAsSeries(mid_main, true);
-    ArraySetAsSeries(mid_signal, true);
+    double exec_main[], exec_signal[], mid_main[], mid_signal[], long_main[];
+    ArraySetAsSeries(exec_main, true); ArraySetAsSeries(exec_signal, true);
+    ArraySetAsSeries(mid_main, true);  ArraySetAsSeries(mid_signal, true);
     ArraySetAsSeries(long_main, true);
     
     if(CopyBuffer(h_macd_exec, 0, 0, 30, exec_main) < 30 || CopyBuffer(h_macd_exec, 1, 0, 30, exec_signal) < 30) return info;
     if(CopyBuffer(h_macd_mid, 0, 0, 4, mid_main) < 4 || CopyBuffer(h_macd_mid, 1, 0, 1, mid_signal) < 1) return info;
     if(CopyBuffer(h_macd_long, 0, 0, 1, long_main) < 1) return info;
     
-    // --- 条件判定 ---
+    // --- 1. ベース条件の判定 ---
     if(is_buy_signal)
     {
         if(CheckMACDDivergence(true, h_macd_exec)) info.divergence = true;
@@ -2272,8 +2355,8 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
         if(long_main[0] > 0) info.long_zeroline = true;
         if(exec_main[0] - exec_main[3] > 0) info.exec_angle = true;
         if(mid_main[0] - mid_main[3] > 0)   info.mid_angle = true;
-        double h0=exec_main[0]-exec_signal[0], h1=exec_main[1]-exec_signal[1], h2=exec_main[2]-exec_signal[2];
-        if(h0 > h1 && h1 > 0 && h2 > 0) info.exec_hist = true;
+        double h0=exec_main[0]-exec_signal[0], h1=exec_main[1]-exec_signal[1];
+        if(h0 > h1 && h1 > 0) info.exec_hist = true;
         if(mid_main[0] - mid_signal[0] > 0) info.mid_hist_sync = true;
     }
     else
@@ -2283,20 +2366,61 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
         if(long_main[0] < 0) info.long_zeroline = true;
         if(exec_main[0] - exec_main[3] < 0) info.exec_angle = true;
         if(mid_main[0] - mid_main[3] < 0)   info.mid_angle = true;
-        double h0=exec_main[0]-exec_signal[0], h1=exec_main[1]-exec_signal[1], h2=exec_main[2]-exec_signal[2];
-        if(h0 < h1 && h1 < 0 && h2 < 0) info.exec_hist = true;
+        double h0=exec_main[0]-exec_signal[0], h1=exec_main[1]-exec_signal[1];
+        if(h0 < h1 && h1 < 0) info.exec_hist = true;
         if(mid_main[0] - mid_signal[0] < 0) info.mid_hist_sync = true;
     }
     
-    // ★★★ スコアリングと内訳の記録 ★★★
-    if(info.divergence)   { info.score_divergence   = 3; info.total_score += info.score_divergence;   }
-    if(info.mid_zeroline)  { info.score_mid_zeroline  = 2; info.total_score += info.score_mid_zeroline;  }
-    if(info.long_zeroline) { info.score_long_zeroline = 3; info.total_score += info.score_long_zeroline; }
-    if(info.exec_angle)    { info.score_exec_angle    = 1; info.total_score += info.score_exec_angle;    }
-    if(info.mid_angle)     { info.score_mid_angle     = 2; info.total_score += info.score_mid_angle;     }
-    if(info.exec_hist)     { info.score_exec_hist     = 1; info.total_score += info.score_exec_hist;     }
-    if(info.mid_hist_sync) { info.score_mid_hist_sync = 1; info.total_score += info.score_mid_hist_sync; }
+    // --- ベーススコアの記録 ---
+    if(info.divergence)   info.score_divergence    = 3;
+    if(info.mid_zeroline)  info.score_mid_zeroline  = 2;
+    if(info.long_zeroline) info.score_long_zeroline = 3;
+    if(info.exec_angle)    info.score_exec_angle    = 1;
+    if(info.mid_angle)     info.score_mid_angle     = 2;
+    if(info.exec_hist)     info.score_exec_hist     = 1;
+    if(info.mid_hist_sync) info.score_mid_hist_sync = 1;
+
+    // --- 2. スコア合計の計算 ---
+    if(InpEnableWeightedScoring) // ★★★ 重み付けスコア計算 ★★★
+    {
+        double weighted_score = 0;
+        if(info.divergence)   weighted_score += info.score_divergence    * InpWeightDivergence;
+        if(info.mid_zeroline)  weighted_score += info.score_mid_zeroline  * InpWeightMidTrend;
+        if(info.long_zeroline) weighted_score += info.score_long_zeroline * InpWeightLongTrend;
+        if(info.exec_angle)    weighted_score += info.score_exec_angle    * InpWeightExecAngle;
+        if(info.mid_angle)     weighted_score += info.score_mid_angle     * InpWeightMidAngle;
+        if(info.exec_hist)     weighted_score += info.score_exec_hist     * InpWeightExecHist;
+        if(info.mid_hist_sync) weighted_score += info.score_mid_hist_sync * InpWeightMidHist;
+        info.total_score = (int)round(weighted_score);
+    }
+    else // 重み付けが無効なら、単純加算
+    {
+        info.total_score = info.score_divergence + info.score_mid_zeroline + info.score_long_zeroline +
+                           info.score_exec_angle + info.score_mid_angle + info.score_exec_hist + info.score_mid_hist_sync;
+    }
+
+    // --- 3. コンボボーナスの加点 ---
+    if(InpEnableComboBonuses) // ★★★ シナジー効果のボーナス ★★★
+    {
+        // 長期トレンドと中期トレンドが一致
+        if(info.long_zeroline && info.mid_zeroline) info.total_score += InpBonusTrendAlignment;
+        // 長期トレンド方向へのダイバージェンス
+        if(info.long_zeroline && info.divergence)   info.total_score += InpBonusTrendDivergence;
+    }
+
+    // --- 4. ソフトVetoの適用（減点）---
+    if(InpEnableSoftVeto) // ★★★ 長期トレンド逆行時のペナルティ ★★★
+    {
+        if(!info.long_zeroline)
+        {
+            PrintFormat("ソフトVeto: 長期トレンド逆行のため、スコア(%d)にペナルティ(%d)を適用します。", info.total_score, InpPenaltyCounterTrend);
+            info.total_score += InpPenaltyCounterTrend;
+        }
+    }
     
+    // スコアがマイナスになった場合は0に補正
+    if(info.total_score < 0) info.total_score = 0;
+
     return info;
 }
 
@@ -2740,4 +2864,113 @@ double GetConversionRate(string from_currency, string to_currency)
 
     // レートが見つからなかった場合
     return 0.0;
+}
+
+//+------------------------------------------------------------------+
+//| グループのトレーリングストップを管理する (ロジック整理版)          |
+//+------------------------------------------------------------------+
+void ManageTrailingSL(PositionGroup &group)
+{
+    if (!InpEnableTrailingSL || !group.isActive || group.splitsDone < InpBreakEvenAfterSplits || InpBreakEvenAfterSplits == 0)
+    {
+        return;
+    }
+
+    double atr_buffer[1];
+    if (CopyBuffer(h_atr_sl, 0, 1, 1, atr_buffer) <= 0) return;
+    double atr_value = atr_buffer[0];
+
+    MqlRates rates[];
+    if(CopyRates(_Symbol, _Period, 0, 2, rates) < 2) return;
+    double reference_price = rates[1].close;
+
+    double new_sl_price = 0;
+    if (group.isBuy)
+    {
+        new_sl_price = reference_price - (atr_value * InpTrailingAtrMultiplier);
+    }
+    else
+    {
+        new_sl_price = reference_price + (atr_value * InpTrailingAtrMultiplier);
+    }
+
+    for (int i = 0; i < group.positionCount; i++)
+    {
+        ModifyPositionSL(group.positionTickets[i], new_sl_price);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 動的決済ロジック（時間経過・反対シグナル）をチェックする         |
+//+------------------------------------------------------------------+
+void CheckDynamicExits()
+{
+    // どちらの機能も無効なら何もしない
+    if (!InpEnableTimeExit && !InpEnableCounterSignalExit)
+    {
+        return;
+    }
+
+    // 管理下の全ポジションをループしてチェック
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        // このEAが管理するポジションでなければスキップ
+        if (PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+        {
+            continue;
+        }
+        
+        if (PositionSelectByTicket(ticket))
+        {
+            ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+            // --- 1. タイム・エグジットのチェック ---
+            if (InpEnableTimeExit)
+            {
+                datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
+                // 現在の足が何本目かを計算
+                int bars_held = iBarShift(_Symbol, _Period, open_time, false);
+
+                if (bars_held > InpExitAfterBars)
+                {
+                    // 現在の含み損益を取得
+                    double current_profit = PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP);
+                    if (current_profit < InpExitMinProfit)
+                    {
+                        PrintFormat("動的決済(時間): ポジション #%d が%d本経過後も利益%.2fに未達のため決済します。", ticket, InpExitAfterBars, InpExitMinProfit);
+                        ClosePosition(ticket);
+                        continue; // このポジションは決済したので次のループへ
+                    }
+                }
+            }
+
+            // --- 2. カウンターシグナル・エグジットのチェック ---
+            if (InpEnableCounterSignalExit)
+            {
+                if (pos_type == POSITION_TYPE_BUY)
+                {
+                    // 買いポジション保有中に、強い「売り」スコアが出たら決済
+                    ScoreComponentInfo sell_info = CalculateMACDScore(false);
+                    if (sell_info.total_score >= InpCounterSignalScore)
+                    {
+                        PrintFormat("動的決済(反対シグナル): 買いポジション #%d 保有中に強い売りスコア(%d)が出たため決済します。", ticket, sell_info.total_score);
+                        ClosePosition(ticket);
+                        continue; // このポジションは決済したので次のループへ
+                    }
+                }
+                else // POSITION_TYPE_SELL
+                {
+                    // 売りポジション保有中に、強い「買い」スコアが出たら決済
+                    ScoreComponentInfo buy_info = CalculateMACDScore(true);
+                    if (buy_info.total_score >= InpCounterSignalScore)
+                    {
+                        PrintFormat("動的決済(反対シグナル): 売りポジション #%d 保有中に強い買いスコア(%d)が出たため決済します。", ticket, buy_info.total_score);
+                        ClosePosition(ticket);
+                        continue; // このポジションは決済したので次のループへ
+                    }
+                }
+            }
+        }
+    }
 }

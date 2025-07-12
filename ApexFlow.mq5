@@ -408,7 +408,20 @@ void CheckPartialCloseEven();
 // ==================================================================
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (実行順序を完成させた最終版)             |
+//| 全てのラインをチェックしてシグナルを生成する専門関数 (新設)      |
+//+------------------------------------------------------------------+
+void ProcessLineSignals()
+{
+    // allLines配列に格納された全てのラインをループ処理
+    for (int i = 0; i < ArraySize(allLines); i++)
+    {
+        // 各ラインに対してシグナルチェックを実行
+        CheckLineSignals(allLines[i]);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| エキスパートティック関数 (シグナル生成プロセスを復活させた最終版) |
 //+------------------------------------------------------------------+
 void OnTick()
 {
@@ -417,25 +430,30 @@ void OnTick()
     // ==================================================================
     if(IsNewBar())
     {
-        // --- 1. シグナルとエントリーを最優先でチェック ---
-        // 状態が「ブレイク済み」に更新される前に、前の足がシグナルを生成したかを判断する
-        CheckZoneMacdCross();
-        CheckEntry();
+        // --- 1. 状態の検知とデータ準備 ---
+        ManageManualLines(); // 手動ラインのブレイク状態を更新
 
-        // --- 2. 状態を検知・更新する ---
-        // シグナルチェックが終わったので、ラインのブレイク状態を永続化する
-        ManageManualLines();
-        
         datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
         if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
         {
             ManagePivotLines();
             g_lastPivotDrawTime = currentPivotBarTime;
         }
+        UpdateLines(); // 全てのライン情報をallLines配列に集約
 
-        // --- 3. データと描画を同期する ---
-        // 更新された最新の状態を元に、すべてのデータと描画を更新
-        UpdateLines();
+        // --- 2. シグナルの生成 ---
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        // ★★★ ここで新設した関数を呼び出し、シグナルを生成します ★★★
+        ProcessLineSignals();
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+
+        // --- 3. エントリー判断 ---
+        // 生成されたシグナルを元にエントリーを試みる
+        CheckZoneMacdCross();
+        CheckEntry();
+
+        // --- 4. データと描画の同期 ---
+        // 取引後の最新の状態でデータと描画を更新
         SyncManagedPositions();
         if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); }
         else { DetectNewEntrances(); }
@@ -460,7 +478,6 @@ void OnTick()
     }
     else { CheckExits(); }
 
-    // 最後にチャートを再描画して、すべての変更を反映
     ChartRedraw();
 }
 
@@ -1520,7 +1537,7 @@ void PlaceOrder(bool isBuy, double price, int score, string triggerReason)
 }
 
 //+------------------------------------------------------------------+
-//| 【ハイブリッドモード対応版】ラインに対するシグナルを検出する     |
+//| ラインに対するシグナルを検出する (ゾーンブレイクの状態記録を追加)   |
 //+------------------------------------------------------------------+
 void CheckLineSignals(Line &line)
 {
@@ -1529,7 +1546,6 @@ void CheckLineSignals(Line &line)
     if(CopyRates(_Symbol, _Period, 0, 2, rates) < 2) return;
 
     int stateIndex = GetLineState(line.name);
-    // ブレイク後の再シグナルを許可しない設定の場合、ここで処理を終了
     if((g_lineStates[stateIndex].isBrokeUp || g_lineStates[stateIndex].isBrokeDown) && !InpAllowSignalAfterBreak)
     {
         return;
@@ -1549,16 +1565,13 @@ void CheckLineSignals(Line &line)
     {
         if(line.type == LINE_TYPE_RESISTANCE)
         {
-            // タッチ（反発）サインのチェック
             if(prev_open <= line.price && prev_high >= line.price && prev_close <= line.price)
             {
                 CreateSignalObject(InpDotPrefix + "TouchRebound_Sell_" + line.name, prevBarTime, line.price + offset, line.signalColor, InpTouchReboundDownCode, line.name + " タッチ反発(売り)");
             }
-            // ブレイクサインのチェック
             if(InpBreakMode && !g_lineStates[stateIndex].isBrokeUp && prev_open < line.price && prev_close >= line.price)
             {
                 CreateSignalObject(InpArrowPrefix + "TouchBreak_Buy_" + line.name, prevBarTime, prev_low - offset, line.signalColor, InpTouchBreakUpCode, line.name + " タッチブレイク(買い)");
-                // ★ハイブリッドモードでは、状態管理をゾーンモード側に任せる
                 if (InpEntryMode != HYBRID_MODE)
                 {
                    g_lineStates[stateIndex].isBrokeUp = true;
@@ -1567,16 +1580,13 @@ void CheckLineSignals(Line &line)
         }
         else // LINE_TYPE_SUPPORT
         {
-            // タッチ（反発）サインのチェック
             if(prev_open >= line.price && prev_low <= line.price && prev_close >= line.price)
             {
                 CreateSignalObject(InpDotPrefix + "TouchRebound_Buy_" + line.name, prevBarTime, line.price - offset, line.signalColor, InpTouchReboundUpCode, line.name + " タッチ反発(買い)");
             }
-            // ブレイクサインのチェック
             if(InpBreakMode && !g_lineStates[stateIndex].isBrokeDown && prev_open > line.price && prev_close <= line.price)
             {
                 CreateSignalObject(InpArrowPrefix + "TouchBreak_Sell_" + line.name, prevBarTime, prev_high + offset, line.signalColor, InpTouchBreakDownCode, line.name + " タッチブレイク(売り)");
-                // ★ハイブリッドモードでは、状態管理をゾーンモード側に任せる
                 if (InpEntryMode != HYBRID_MODE)
                 {
                     g_lineStates[stateIndex].isBrokeDown = true;
@@ -1590,7 +1600,6 @@ void CheckLineSignals(Line &line)
     // ==========================================================
     if(InpEntryMode == ZONE_MODE || InpEntryMode == HYBRID_MODE)
     {
-        // --- リテスト待ち状態の有効期限チェック ---
         if (g_lineStates[stateIndex].waitForRetestUp || g_lineStates[stateIndex].waitForRetestDown)
         {
             int barsSinceBreak = iBarShift(_Symbol, _Period, g_lineStates[stateIndex].breakTime);
@@ -1603,21 +1612,24 @@ void CheckLineSignals(Line &line)
 
         double zone_width = InpZonePips * g_pip;
 
-        // --- シグナル検知ロジック本体 ---
-        if (line.type == LINE_TYPE_RESISTANCE) // レジスタンスラインの場合
+        if (line.type == LINE_TYPE_RESISTANCE)
         {
-            // 1. フォールスブレイク検知 (売りシグナル)
+            // 1. フォールスブレイク検知 (売りシグナル) → ゾーンの役割終了
             if (prev_high > line.price + zone_width && prev_close < line.price)
             {
                 CreateSignalObject(InpDotPrefix + "FalseBreak_Sell_" + line.name, prevBarTime, prev_high + offset, clrHotPink, InpFalseBreakSellCode, line.name + " フォールスブレイク(売り)");
+                // ★★★ ゾーンの役割が完了したので、ブレイク時刻を記録してゾーンを停止させる ★★★
+                g_lineStates[stateIndex].breakTime = prevBarTime;
             }
-            // 2. ブレイク＆リテスト検知 (買いシグナル)
+            // 2. ブレイク＆リテスト検知 (買いシグナル) → ゾーンの役割終了
             else if (g_lineStates[stateIndex].waitForRetestUp)
             {
                 if (prev_low <= line.price && prev_close > line.price)
                 {
                     CreateSignalObject(InpArrowPrefix + "Retest_Buy_" + line.name, prevBarTime, prev_low - offset, clrDeepSkyBlue, InpRetestBuyCode, line.name + " ブレイク＆リテスト(買い)");
-                    g_lineStates[stateIndex].waitForRetestUp = false; 
+                    g_lineStates[stateIndex].waitForRetestUp = false;
+                    // ★★★ ゾーンの役割が完了したので、ブレイク時刻を記録してゾーンを停止させる ★★★
+                    g_lineStates[stateIndex].breakTime = prevBarTime;
                 }
             }
             // 3. 新規ブレイクの検知 (状態設定)
@@ -1634,18 +1646,22 @@ void CheckLineSignals(Line &line)
         }
         else // サポートラインの場合 (LINE_TYPE_SUPPORT)
         {
-            // 1. フォールスブレイク検知 (買いシグナル)
+            // 1. フォールスブレイク検知 (買いシグナル) → ゾーンの役割終了
             if (prev_low < line.price - zone_width && prev_close > line.price)
             {
                 CreateSignalObject(InpDotPrefix + "FalseBreak_Buy_" + line.name, prevBarTime, prev_low - offset, clrDeepSkyBlue, InpFalseBreakBuyCode, line.name + " フォールスブレイク(買い)");
+                // ★★★ ゾーンの役割が完了したので、ブレイク時刻を記録してゾーンを停止させる ★★★
+                g_lineStates[stateIndex].breakTime = prevBarTime;
             }
-            // 2. ブレイク＆リテスト検知 (売りシグナル)
+            // 2. ブレイク＆リテスト検知 (売りシグナル) → ゾーンの役割終了
             else if (g_lineStates[stateIndex].waitForRetestDown)
             {
                 if (prev_high >= line.price && prev_close < line.price)
                 {
                     CreateSignalObject(InpArrowPrefix + "Retest_Sell_" + line.name, prevBarTime, prev_high + offset, clrHotPink, InpRetestSellCode, line.name + " ブレイク＆リテスト(売り)");
                     g_lineStates[stateIndex].waitForRetestDown = false;
+                    // ★★★ ゾーンの役割が完了したので、ブレイク時刻を記録してゾーンを停止させる ★★★
+                    g_lineStates[stateIndex].breakTime = prevBarTime;
                 }
             }
             // 3. 新規ブレイクの検知 (状態設定)
@@ -2077,7 +2093,7 @@ bool SetBreakEven(ulong ticket, double entryPrice)
 }
 
 //+------------------------------------------------------------------+
-//| 手動ラインの状態を監視し、ブレイクを検出する (状態記録ロジック修正版) |
+//| 手動ラインの状態を監視し、ブレイクを検出する (ハイブリッドモード対応版) |
 //+------------------------------------------------------------------+
 void ManageManualLines()
 {
@@ -2099,23 +2115,32 @@ void ManageManualLines()
                          
         if(is_broken)
         {
+            // 1. ラインの見た目を停止させる処理は、どのモードでも実行
             ObjectSetInteger(0, name, OBJPROP_TIME, 1, rates[1].time);
             ObjectSetString(0, name, OBJPROP_TEXT, text + "-Broken");
             ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
 
-            int stateIndex = GetLineState(name);
-            if(stateIndex >= 0)
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            // ★★★ ここが今回の修正ポイントです ★★★
+            // ハイブリッドモード「以外」の場合のみ、状態を更新する
+            if (InpEntryMode != HYBRID_MODE)
             {
-                g_lineStates[stateIndex].breakTime = rates[1].time;
-                if(StringFind(text, "Resistance") >= 0)
+                // 2. EAの記憶（状態管理）にブレイクした事実と時刻を記録する
+                int stateIndex = GetLineState(name);
+                if(stateIndex >= 0)
                 {
-                    g_lineStates[stateIndex].isBrokeUp = true;
-                }
-                else
-                {
-                    g_lineStates[stateIndex].isBrokeDown = true;
+                    g_lineStates[stateIndex].breakTime = rates[1].time;
+                    if(StringFind(text, "Resistance") >= 0)
+                    {
+                        g_lineStates[stateIndex].isBrokeUp = true;
+                    }
+                    else
+                    {
+                        g_lineStates[stateIndex].isBrokeDown = true;
+                    }
                 }
             }
+            // ★★★ 修正ここまで ★★★
         }
     }
 }
@@ -2376,7 +2401,7 @@ void AddPanelLine(string &lines[], const string text)
 }
 
 //+------------------------------------------------------------------+
-//| MACDスコアを計算（高度スコアリングシステム実装版）               |
+//| MACDスコアを計算（ソフトVetoのログ出力を無効化）                 |
 //+------------------------------------------------------------------+
 ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
 {
@@ -2426,7 +2451,7 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
     if(info.mid_hist_sync) info.score_mid_hist_sync = 1;
 
     // --- 2. スコア合計の計算 ---
-    if(InpEnableWeightedScoring) // ★★★ 重み付けスコア計算 ★★★
+    if(InpEnableWeightedScoring)
     {
         double weighted_score = 0;
         if(info.divergence)   weighted_score += info.score_divergence    * InpWeightDivergence;
@@ -2438,32 +2463,32 @@ ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
         if(info.mid_hist_sync) weighted_score += info.score_mid_hist_sync * InpWeightMidHist;
         info.total_score = (int)round(weighted_score);
     }
-    else // 重み付けが無効なら、単純加算
+    else
     {
         info.total_score = info.score_divergence + info.score_mid_zeroline + info.score_long_zeroline +
                            info.score_exec_angle + info.score_mid_angle + info.score_exec_hist + info.score_mid_hist_sync;
     }
 
     // --- 3. コンボボーナスの加点 ---
-    if(InpEnableComboBonuses) // ★★★ シナジー効果のボーナス ★★★
+    if(InpEnableComboBonuses)
     {
-        // 長期トレンドと中期トレンドが一致
         if(info.long_zeroline && info.mid_zeroline) info.total_score += InpBonusTrendAlignment;
-        // 長期トレンド方向へのダイバージェンス
         if(info.long_zeroline && info.divergence)   info.total_score += InpBonusTrendDivergence;
     }
 
     // --- 4. ソフトVetoの適用（減点）---
-    if(InpEnableSoftVeto) // ★★★ 長期トレンド逆行時のペナルティ ★★★
+    if(InpEnableSoftVeto)
     {
         if(!info.long_zeroline)
         {
-            PrintFormat("ソフトVeto: 長期トレンド逆行のため、スコア(%d)にペナルティ(%d)を適用します。", info.total_score, InpPenaltyCounterTrend);
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            // ★★★ この行をコメントアウトして無効化します ★★★
+            // PrintFormat("ソフトVeto: 長期トレンド逆行のため、スコア(%d)にペナルティ(%d)を適用します。", info.total_score, InpPenaltyCounterTrend);
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
             info.total_score += InpPenaltyCounterTrend;
         }
     }
     
-    // スコアがマイナスになった場合は0に補正
     if(info.total_score < 0) info.total_score = 0;
 
     return info;

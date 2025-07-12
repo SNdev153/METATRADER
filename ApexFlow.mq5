@@ -408,55 +408,60 @@ void CheckPartialCloseEven();
 // ==================================================================
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (手動TPリセット問題を修正)
+//| エキスパートティック関数 (実行順序を完成させた最終版)             |
 //+------------------------------------------------------------------+
 void OnTick()
 {
-   if(IsNewBar())
-   {
-      // ★★★ TP設定変更時の自動リセット機能を削除 ★★★
+    // ==================================================================
+    // === セクション1: 新規バーでのみ実行する処理                       ===
+    // ==================================================================
+    if(IsNewBar())
+    {
+        // --- 1. シグナルとエントリーを最優先でチェック ---
+        // 状態が「ブレイク済み」に更新される前に、前の足がシグナルを生成したかを判断する
+        CheckZoneMacdCross();
+        CheckEntry();
 
-      // === 描画 & 状態管理ブロック ===
-      datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
-      if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
-      {
-         ManagePivotLines();
-         UpdateLines();
-         g_lastPivotDrawTime = currentPivotBarTime;
-      }
+        // --- 2. 状態を検知・更新する ---
+        // シグナルチェックが終わったので、ラインのブレイク状態を永続化する
+        ManageManualLines();
+        
+        datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
+        if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
+        {
+            ManagePivotLines();
+            g_lastPivotDrawTime = currentPivotBarTime;
+        }
 
-      // 1. ポジション状態を完全に更新する
-      SyncManagedPositions(); 
-      if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } 
-      else { DetectNewEntrances(); }
+        // --- 3. データと描画を同期する ---
+        // 更新された最新の状態を元に、すべてのデータと描画を更新
+        UpdateLines();
+        SyncManagedPositions();
+        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); }
+        else { DetectNewEntrances(); }
+        
+        UpdateZones();
+        ManageSlLines();
+        ManageZoneVisuals();
+        ManageInfoPanel();
+    }
 
-      // 2. 更新されたポジション状態に基づいて、UIを更新する
-      UpdateZones();
-      ManageSlLines();
-      ManageZoneVisuals();
-      ManageInfoPanel();
-      
-      // === 取引実行ブロック ===
-      CheckPartialCloseEven();
+    // ==================================================================
+    // === セクション2: 毎ティック実行する処理 (決済ロジック)           ===
+    // ==================================================================
+    CheckPartialCloseEven();
+    CheckDynamicExits();
+    if (InpPositionMode == MODE_AGGREGATE)
+    {
+        CheckExitForGroup(buyGroup);
+        CheckExitForGroup(sellGroup);
+        ManageTrailingSL(buyGroup);
+        ManageTrailingSL(sellGroup);
+    }
+    else { CheckExits(); }
 
-      CheckDynamicExits();
-
-      if (InpPositionMode == MODE_AGGREGATE) 
-      { 
-         CheckExitForGroup(buyGroup); 
-         CheckExitForGroup(sellGroup);
-         ManageTrailingSL(buyGroup);
-         ManageTrailingSL(sellGroup);
-      } 
-      else { CheckExits(); }
-
-      CheckZoneMacdCross();
-      CheckEntry();
-      
-      // === その他管理ブロック ===
-      ManageManualLines();
-      ChartRedraw();
-   }
+    // 最後にチャートを再描画して、すべての変更を反映
+    ChartRedraw();
 }
 
 //+------------------------------------------------------------------+
@@ -615,14 +620,14 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (全機能統合・最終版)
-//+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//| エキスパート初期化関数 (タイムラグ対策版)                        |
+//| エキスパート初期化関数 (状態永続化のバグを修正した最終完成版)      |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    ArrayResize(g_lineStates, 0);
+    // ArrayResize(g_lineStates, 0); // ★★★ この行を削除、またはコメントアウトします ★★★
+                                     // これが全ての記憶を消去していた元凶です。
+                                     // グローバル変数はEAがチャート上にある限り維持されるため、初期化は不要です。
+
     g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
     g_lastBarTime = 0;
     lastTradeTime = 0;
@@ -668,11 +673,7 @@ int OnInit()
     prev_tp_mode = InpTPLineMode;
     prev_tp_timeframe = InpTP_Timeframe;
     
-    // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    // ★★★ タイムラグ問題の恒久対策 ★★★
-    // EA起動時に一度、ライン情報を読み込んでおく
     UpdateLines();
-    // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     
     Print("ApexFlowEA v4.0 初期化完了");
     return(INIT_SUCCEEDED);
@@ -1692,7 +1693,7 @@ void UpdateLines()
             int stateIndex = GetLineState(line.name);
             line.isBrokeUp = g_lineStates[stateIndex].isBrokeUp;
             line.isBrokeDown = g_lineStates[stateIndex].isBrokeDown;
-            line.breakTime = g_lineStates[stateIndex].breakTime; // ★★★ ピボットラインにもブレイク時刻をセット ★★★
+            line.breakTime = g_lineStates[stateIndex].breakTime;
             int size = ArraySize(allLines);
             ArrayResize(allLines, size + 1);
             allLines[size] = line;
@@ -1714,7 +1715,8 @@ void UpdateLines()
         int stateIndex = GetLineState(m_line.name);
         m_line.isBrokeUp = g_lineStates[stateIndex].isBrokeUp;
         m_line.isBrokeDown = g_lineStates[stateIndex].isBrokeDown;
-        m_line.breakTime = g_lineStates[stateIndex].breakTime; // ★★★ 手動ラインにもブレイク時刻をセット ★★★
+        m_line.breakTime = g_lineStates[stateIndex].breakTime;
+        
         int size = ArraySize(allLines);
         ArrayResize(allLines, size + 1);
         allLines[size] = m_line;
@@ -2075,7 +2077,7 @@ bool SetBreakEven(ulong ticket, double entryPrice)
 }
 
 //+------------------------------------------------------------------+
-//| 手動ラインの状態を監視し、ブレイクを検出する (S/R分離版)         |
+//| 手動ラインの状態を監視し、ブレイクを検出する (状態記録ロジック修正版) |
 //+------------------------------------------------------------------+
 void ManageManualLines()
 {
@@ -2085,7 +2087,6 @@ void ManageManualLines()
     for(int i = ObjectsTotal(0, -1, OBJ_TREND) - 1; i >= 0; i--)
     {
         string name = ObjectName(0, i, -1, OBJ_TREND);
-        // ★★★ 変更点: 新しいプレフィックスを両方チェック ★★★
         if(StringFind(name, "ManualSupport_") != 0 && StringFind(name, "ManualResistance_") != 0) continue;
 
         string text = ObjectGetString(0, name, OBJPROP_TEXT);
@@ -2093,7 +2094,6 @@ void ManageManualLines()
         
         double price = ObjectGetDouble(0, name, OBJPROP_PRICE, 0);
         
-        // 役割（テキスト）に応じてブレイク条件を判定
         bool is_broken = (StringFind(text, "Resistance") >= 0 && rates[1].close > price) ||
                          (StringFind(text, "Support") >= 0 && rates[1].close < price);
                          
@@ -2102,6 +2102,20 @@ void ManageManualLines()
             ObjectSetInteger(0, name, OBJPROP_TIME, 1, rates[1].time);
             ObjectSetString(0, name, OBJPROP_TEXT, text + "-Broken");
             ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
+
+            int stateIndex = GetLineState(name);
+            if(stateIndex >= 0)
+            {
+                g_lineStates[stateIndex].breakTime = rates[1].time;
+                if(StringFind(text, "Resistance") >= 0)
+                {
+                    g_lineStates[stateIndex].isBrokeUp = true;
+                }
+                else
+                {
+                    g_lineStates[stateIndex].isBrokeDown = true;
+                }
+            }
         }
     }
 }
@@ -3133,22 +3147,16 @@ void ManageZoneVisuals()
 
         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, line.startTime, upper_zone))
         {
-            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-            // ★★★ ここからが今回の修正ポイントです ★★★
-            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
             datetime endTime;
             if (line.breakTime > 0)
             {
-                // ラインがブレイク済みの場合、ゾーンの終点をブレイク時刻に合わせる
                 endTime = line.breakTime;
             }
             else
             {
-                // まだブレイクされていない場合、未来に向かってゾーンを描画
-                endTime = TimeCurrent() + 3600 * 24 * 30; // 約1ヶ月先
+                endTime = TimeCurrent() + 3600 * 24 * 30;
             }
             ObjectSetInteger(0, name, OBJPROP_TIME, 1, endTime);
-            // ★★★ 修正ここまで ★★★
             
             ObjectSetDouble(0, name, OBJPROP_PRICE, 1, lower_zone);
             ObjectSetInteger(0, name, OBJPROP_COLOR, zone_color);

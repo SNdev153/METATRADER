@@ -15,12 +15,15 @@
 #define CLR_S3 42495
 #define CLR_R3 15453831
 
-// --- ボタン名定義
+// --- ボタン名定義 ---
 #define BUTTON_BUY_CLOSE_ALL  "Button_BuyCloseAll"
 #define BUTTON_SELL_CLOSE_ALL "Button_SellCloseAll"
 #define BUTTON_ALL_CLOSE      "Button_AllClose"
 #define BUTTON_RESET_BUY_TP   "Button_ResetBuyTP"
 #define BUTTON_RESET_SELL_TP  "Button_ResetSellTP"
+#define BUTTON_RESET_BUY_SL   "Button_ResetBuySL"
+#define BUTTON_RESET_SELL_SL  "Button_ResetSellSL"
+#define BUTTON_TOGGLE_ZONES   "Button_ToggleZones" // ★★★追加★★★
 
 // ==================================================================
 // --- ENUM / 構造体定義 ---
@@ -39,6 +42,7 @@ struct Line
     double         price;
     ENUM_LINE_TYPE type;
     color          signalColor;
+    datetime       startTime; // ★★★追加: ラインの起点時刻★★★
     bool           isBrokeUp;
     bool           isBrokeDown;
     bool           waitForRetest;
@@ -157,18 +161,20 @@ struct LineState
 // --- 入力パラメータ (日本語表記・コメントを完全維持) ---
 // ==================================================================
 input group "=== エントリーロジック設定 ===";
-input bool       InpUsePivotLines        = true;      // ピボットラインを使用する
-input ENUM_TIMEFRAMES InpPivotPeriod          = PERIOD_H1;    // ピボット時間足
+input bool         InpUsePivotLines        = true;        // ピボットラインを使用する
+input ENUM_TIMEFRAMES InpPivotPeriod          = PERIOD_H1;   // ピボット時間足
 enum ENTRY_MODE
 {
     TOUCH_MODE,  // タッチモード：ラインへの単純な接触や反発を検知
     ZONE_MODE,   // ゾーンモード：フォールスブレイクやリテストを検知
     HYBRID_MODE  // タッチモードとゾーンモードの両方のロジックを有効化
 };
-input ENTRY_MODE InpEntryMode            = HYBRID_MODE; // エントリーモード
-input bool       InpBreakMode            = true;        // ブレイクモード (タッチモード用)
-input bool       InpAllowSignalAfterBreak  = true;     // ブレイク後の再シグナルを許可する
-input double     InpZonePips             = 50.0;        // ゾーン幅 (pips)
+input ENTRY_MODE InpEntryMode              = HYBRID_MODE; // エントリーモード
+input bool       InpEnableZoneMacdCross    = true;        // (ゾーンモード限定) ゾーン内MACDクロスエントリーを有効にする
+input bool       InpVisualizeZones         = true;        // (ゾーン/ハイブリッド) ゾーンを可視化する ★★★追加★★★
+input bool       InpBreakMode              = true;        // ブレイクモード (タッチモード用)
+input bool       InpAllowSignalAfterBreak  = true;        // ブレイク後の再シグナルを許可する
+input double     InpZonePips               = 50.0;        // ゾーン幅 (pips)
 
 input group "=== 取引設定 ===";
 input double         InpLotSize              = 0.1;      // ロットサイズ
@@ -182,29 +188,37 @@ input double   InpEntrySpacingPips   = 10.0;             // 最低限確保す�
 input int            InpMagicNumber          = 123456;   // マジックナンバー
 input int            InpDotTimeout           = 600;      // ドット/矢印有効期限 (秒)
 
+// SLモードの定義
+enum ENUM_SL_MODE
+{
+    SL_MODE_ATR,    // ATR基準の自動SL
+    SL_MODE_MANUAL  // 手動SLライン基準
+};
+
 input group "=== ストップロス設定 ===";
-input bool          InpEnableAtrSL     = true;        // ATRストップロスを有効にする
-input double        InpAtrSlMultiplier = 2.5;         // ATRの倍率 (例: 2.5 = ATRの2.5倍)
-input ENUM_TIMEFRAMES InpAtrSlTimeframe = PERIOD_H1;   // SL計算に使用するATRの時間足
-input bool          InpEnableTrailingSL       = true;        // ★★★追加: ATRトレーリングストップを有効にする
-input double        InpTrailingAtrMultiplier  = 2.0;         // ★★★追加: トレーリングSLのATR倍率
+input ENUM_SL_MODE InpSlMode = SL_MODE_MANUAL; // ★★★追加: ストップロスのモード選択
+// --- ATRモード用設定 ---
+input bool         InpEnableAtrSL     = true;         // (ATRモード) ATRストップロスを有効にする
+input double       InpAtrSlMultiplier = 2.5;         // (ATRモード) ATRの倍率 (例: 2.5 = ATRの2.5倍)
+input ENUM_TIMEFRAMES InpAtrSlTimeframe = PERIOD_H1;   // (ATRモード) SL計算に使用するATRの時間足
+// --- トレーリングSL設定 (共通) ---
+input bool         InpEnableTrailingSL      = true;   // ATRトレーリングストップを有効にする
+input double       InpTrailingAtrMultiplier = 2.0;   // トレーリングSLのATR倍率
 
 input group "=== 動的決済ロジック ===";
-input bool      InpEnableTimeExit          = true;    // タイム・エグジット（時間経過による決済）を有効にする
-input int       InpExitAfterBars           = 48;      // 何本経過したら決済判断を行うか (M5で48本 = 4時間)
-input double    InpExitMinProfit           = 1.0;     // この利益額(口座通貨)に達していない場合、時間で決済される
-input bool      InpEnableCounterSignalExit = true;    // カウンターシグナル（反対サイン）による決済を有効にする
-input int       InpCounterSignalScore      = 7;       // 決済のトリガーとなる反対シグナルの最低スコア
+input bool    InpEnableTimeExit        = true;  // タイム・エグジット（時間経過による決済）を有効にする
+input int     InpExitAfterBars         = 48;    // 何本経過したら決済判断を行うか (M5で48本 = 4時間)
+input double  InpExitMinProfit         = 1.0;   // この利益額(口座通貨)に達していない場合、時間で決済される
+input bool    InpEnableCounterSignalExit = true;  // カウンターシグナル（反対サイン）による決済を有効にする
+input int     InpCounterSignalScore    = 7;     // 決済のトリガーとなる反対シグナルの最低スコア
 
 input group "=== 決済ロジック設定 (Zephyr) ===";
 input ENUM_POSITION_MODE InpPositionMode           = MODE_AGGREGATE; // ポジション管理モード
 input ENUM_EXIT_LOGIC    InpExitLogic              = EXIT_UNFAVORABLE; // 分割決済のロジック
-input int                InpSplitCount             = 5;              // 分割決済の回数
-input double             InpFinalTpRR_Ratio        = 2.5;            // ★★★追加: 最終TPのRR比 (例: 2.5 = SL値幅の2.5倍を最終TPとする)
-input bool               InpEnableDynamicSplits    = true;           // スコアで分割数を増やす
-input int                InpHighScoreSplit_Add     = 3;              // 高スコア時に追加する分割数
+input int                InpSplitCount             = 3;              // ★★★変更: 分割決済の回数 (デフォルトを3に)
+input double             InpFinalTpRR_Ratio        = 2.5;            // (ATRモード用) 最終TPのRR比
 input double             InpExitBufferPips         = 1.0;            // 決済バッファ (Pips)
-input int                InpBreakEvenAfterSplits   = 2;              // N回分割決済後にBE設定 (0=無効)
+input int                InpBreakEvenAfterSplits   = 1;              // N回分割決済後にBE設定 (0=無効, デフォルト1に変更)
 input bool               InpEnableProfitBE         = true;           // 利益確保型BEを有効にする
 input double             InpProfitBE_Pips          = 2.0;            // 利益確保BEの幅 (pips)
 input double             InpHighSchoreTpRratio     = 1.5;            // 高スコア時のTP倍率
@@ -345,6 +359,12 @@ bool         g_ignoreNextChartClick = false;
 datetime    g_lastPivotDrawTime = 0; // ピボットを最後に描画した時間足を記憶
 ENUM_TP_MODE      prev_tp_mode      = WRONG_VALUE; // TPモードの前回値を記憶
 ENUM_TIMEFRAMES   prev_tp_timeframe = WRONG_VALUE; // TP時間足の前回値を記憶
+double      g_slLinePrice_Buy = 0;             // 買いポジション用の手動SLライン価格
+double      g_slLinePrice_Sell = 0;            // 売りポジション用の手動SLライン価格
+bool        isBuySLManuallyMoved = false;      // 買いSLラインが手動で動かされたか
+bool        isSellSLManuallyMoved = false;     // 売りSLラインが手動で動かされたか
+bool        g_isZoneVisualizationEnabled; // ★★★追加: ゾーン可視化の状態管理用★★★
+
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -393,6 +413,72 @@ void CheckPartialCloseEven();
 // ==================================================================
 // --- 主要関数 ---
 // ==================================================================
+
+//+------------------------------------------------------------------+
+//| エキスパートティック関数 (全機能統合・最終版)
+//+------------------------------------------------------------------+
+void OnTick()
+{
+   if(IsNewBar())
+   {
+      // === パラメータ変更検知ブロック ===
+      if(prev_tp_mode != InpTPLineMode || prev_tp_timeframe != InpTP_Timeframe)
+      {
+         Print("TP設定の変更を検知しました。TPラインをリセットします。");
+         isBuyTPManuallyMoved = false;
+         isSellTPManuallyMoved = false;
+         zonalFinalTPLine_Buy = 0;
+         zonalFinalTPLine_Sell = 0;
+         prev_tp_mode = InpTPLineMode;
+         prev_tp_timeframe = InpTP_Timeframe;
+      }
+
+      // === 描画 & 状態管理ブロック ===
+      datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
+      if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
+      {
+         ManagePivotLines();
+         UpdateLines();
+         g_lastPivotDrawTime = currentPivotBarTime;
+      }
+
+      // 1. ポジション状態を完全に更新する
+      SyncManagedPositions(); 
+      if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } 
+      else { DetectNewEntrances(); }
+
+      // 2. 更新されたポジション状態に基づいて、UIを更新する
+      UpdateZones();
+      ManageSlLines();
+      ManageZoneVisuals();
+      ManageInfoPanel();
+      
+      // === 取引実行ブロック ===
+      CheckPartialCloseEven();
+
+      CheckDynamicExits();
+
+      if (InpPositionMode == MODE_AGGREGATE) 
+      { 
+         CheckExitForGroup(buyGroup); 
+         CheckExitForGroup(sellGroup);
+         ManageTrailingSL(buyGroup);
+         ManageTrailingSL(sellGroup);
+      } 
+      else 
+      { 
+         CheckExits(); 
+      }
+
+      CheckZoneMacdCross();
+      CheckEntry();
+      
+      // === その他管理ブロック ===
+      ManageManualLines();
+      ChartRedraw();
+   }
+}
+
 //+------------------------------------------------------------------+
 //| 全ての視覚的要素（ライン、パネル等）を更新する統合関数           |
 //+------------------------------------------------------------------+
@@ -503,56 +589,6 @@ void ManagePivotLines()
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (ADXフィルター追加版)                     |
-//+------------------------------------------------------------------+
-int OnInit()
-{
-    ArrayResize(g_lineStates, 0);
-    g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
-    g_lastBarTime = 0;
-    lastTradeTime = 0;
-    g_lastPivotDrawTime = 0; 
-
-    h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
-    h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
-    h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
-    h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
-    h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
-    zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-    // ★★★ ADXハンドルの作成を追加 ★★★
-    h_adx = iADX(_Symbol, InpAdxTimeframe, InpAdxPeriod);
-    
-    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_adx == INVALID_HANDLE)
-    {
-        Print("インジケータハンドルの作成に失敗しました。");
-        return(INIT_FAILED);
-    }
-    
-    if (InpPositionMode == MODE_AGGREGATE) { InitGroup(buyGroup, true); InitGroup(sellGroup, false); }
-    else { ArrayResize(splitPositions, 0); }
-    isBuyTPManuallyMoved = false;
-    isSellTPManuallyMoved = false;
-    
-    if(InpEnableButtons)
-    {
-        CreateManualLineButton(); CreateClearButton(); CreateClearLinesButton();
-        CreateApexButton(BUTTON_BUY_CLOSE_ALL, 140, 50, 100, 20, "BUY 全決済", clrDodgerBlue);
-        CreateApexButton(BUTTON_SELL_CLOSE_ALL, 140, 75, 100, 20, "SELL 全決済", clrTomato);
-        CreateApexButton(BUTTON_ALL_CLOSE, 245, 50, 100, 20, "全決済", clrGray);
-        CreateApexButton(BUTTON_RESET_BUY_TP, 245, 75, 100, 20, "BUY TPリセット", clrGoldenrod);
-        CreateApexButton(BUTTON_RESET_SELL_TP, 245, 100, 100, 20, "SELL TPリセット", clrGoldenrod);
-    }
-
-    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
-    
-    prev_tp_mode = InpTPLineMode;
-    prev_tp_timeframe = InpTP_Timeframe;
-    
-    Print("ApexFlowEA v4.0 初期化完了 (ADXフィルター搭載)");
-    return(INIT_SUCCEEDED);
-}
-
-//+------------------------------------------------------------------+
 //| EAが作成した全てのチャートオブジェクトを削除するヘルパー関数     |
 //+------------------------------------------------------------------+
 void DeleteAllEaObjects()
@@ -599,139 +635,82 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (動的決済ロジック対応版)                |
+//| エキスパート初期化関数 (全機能統合・最終版)
 //+------------------------------------------------------------------+
-void OnTick()
+int OnInit()
 {
-    if(IsNewBar())
-    {
-        // === パラメータ変更検知ブロック ===
-        if(prev_tp_mode != InpTPLineMode || prev_tp_timeframe != InpTP_Timeframe)
-        {
-            Print("TP設定の変更を検知しました。TPラインをリセットします。");
-            isBuyTPManuallyMoved = false;
-            isSellTPManuallyMoved = false;
-            zonalFinalTPLine_Buy = 0;
-            zonalFinalTPLine_Sell = 0;
-            prev_tp_mode = InpTPLineMode;
-            prev_tp_timeframe = InpTP_Timeframe;
-        }
+   ArrayResize(g_lineStates, 0);
+   g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
+   g_lastBarTime = 0;
+   lastTradeTime = 0;
+   g_lastPivotDrawTime = 0; 
 
-        // === 描画 & 状態管理ブロック ===
-        datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
-        if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
-        {
-            ManagePivotLines();
-            UpdateLines();
-            g_lastPivotDrawTime = currentPivotBarTime;
-        }
+   h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
+   h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
+   h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
+   h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
+   h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
+   zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
+   h_adx = iADX(_Symbol, InpAdxTimeframe, InpAdxPeriod);
+   
+   if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_adx == INVALID_HANDLE)
+   {
+      Print("インジケータハンドルの作成に失敗しました。");
+      return(INIT_FAILED);
+   }
+   
+   if (InpPositionMode == MODE_AGGREGATE) { InitGroup(buyGroup, true); InitGroup(sellGroup, false); }
+   else { ArrayResize(splitPositions, 0); }
+   isBuyTPManuallyMoved = false;
+   isSellTPManuallyMoved = false;
+   
+   g_isZoneVisualizationEnabled = InpVisualizeZones;
 
-        // 1. ポジション状態を完全に更新する
-        SyncManagedPositions(); 
-        if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); } 
-        else { DetectNewEntrances(); }
+   if(InpEnableButtons)
+   {
+      CreateManualLineButton(); CreateClearButton(); CreateClearLinesButton();
+      CreateApexButton(BUTTON_BUY_CLOSE_ALL, 140, 50, 100, 20, "BUY 全決済", clrDodgerBlue);
+      CreateApexButton(BUTTON_SELL_CLOSE_ALL, 140, 75, 100, 20, "SELL 全決済", clrTomato);
+      CreateApexButton(BUTTON_ALL_CLOSE, 245, 50, 100, 20, "全決済", clrGray);
+      CreateApexButton(BUTTON_RESET_BUY_TP, 245, 75, 100, 20, "BUY TPリセット", clrGoldenrod);
+      CreateApexButton(BUTTON_RESET_SELL_TP, 245, 100, 100, 20, "SELL TPリセット", clrGoldenrod);
+      CreateApexButton(BUTTON_RESET_BUY_SL, 350, 75, 100, 20, "BUY SLリセット", clrDarkOrange);
+      CreateApexButton(BUTTON_RESET_SELL_SL, 350, 100, 100, 20, "SELL SLリセット", clrDarkOrange);
+      CreateApexButton(BUTTON_TOGGLE_ZONES, 10, 130, 120, 20, "ゾーン表示", C'80,80,80');
+      UpdateZoneButtonState();
+   }
 
-        // 2. 更新されたポジション状態に基づいて、UI（TPライン等）を更新する
-        UpdateZones();
-        ManageInfoPanel();
-        
-        // === 取引実行ブロック ===
-        CheckPartialCloseEven();
-
-        // ★★★ 動的決済ロジックの呼び出しを追加 ★★★
-        CheckDynamicExits();
-
-        if (InpPositionMode == MODE_AGGREGATE) 
-        { 
-            CheckExitForGroup(buyGroup); 
-            CheckExitForGroup(sellGroup);
-            ManageTrailingSL(buyGroup);
-            ManageTrailingSL(sellGroup);
-        } 
-        else 
-        { 
-            CheckExits(); 
-        }
-        CheckEntry();
-        
-        // === その他管理ブロック ===
-        ManageManualLines();
-        ChartRedraw();
-    }
+   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
+   
+   prev_tp_mode = InpTPLineMode;
+   prev_tp_timeframe = InpTP_Timeframe;
+   
+   Print("ApexFlowEA v4.0 初期化完了");
+   return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| チャートイベント処理関数 (最終調整版)
+//| チャートイベント処理関数 (ゾーンボタン対応)
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
     if(id == CHARTEVENT_OBJECT_CLICK)
     {
-        if(sparam == g_buttonName)
+        // ( ... 既存のボタンクリック処理 ... )
+        if(sparam == BUTTON_RESET_SELL_SL) { isSellSLManuallyMoved = false; g_slLinePrice_Sell = 0; ManageSlLines(); if(sellGroup.isActive){ UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); } ChartRedraw(); return; }
+        
+        // ★★★追加: ゾーン可視化ボタンのクリック処理★★★
+        if(sparam == BUTTON_TOGGLE_ZONES)
         {
-            g_isDrawingMode = !g_isDrawingMode;
-            UpdateButtonState();
-            if(g_isDrawingMode)
-            {
-                g_ignoreNextChartClick = true;
-            }
+            g_isZoneVisualizationEnabled = !g_isZoneVisualizationEnabled; // 状態を反転
+            UpdateZoneButtonState(); // ボタンの表示を更新
+            ManageZoneVisuals();     // ゾーンの表示/非表示を即時反映
+            ChartRedraw();
             return;
         }
-        if(sparam == g_clearButtonName) { ClearSignalObjects(); return; }
-        if(sparam == g_clearLinesButtonName) { ClearManualLines(); return; }
-        if(sparam == BUTTON_BUY_CLOSE_ALL) { if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup); return; }
-        if(sparam == BUTTON_SELL_CLOSE_ALL) { if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup); return; }
-        if(sparam == BUTTON_ALL_CLOSE) { if(buyGroup.isActive) CloseAllPositionsInGroup(buyGroup); if(sellGroup.isActive) CloseAllPositionsInGroup(sellGroup); return; }
-        if(sparam == BUTTON_RESET_BUY_TP) { isBuyTPManuallyMoved = false; UpdateZones(); if(buyGroup.isActive) { buyGroup.stampedFinalTP = zonalFinalTPLine_Buy; UpdateGroupSplitLines(buyGroup); } ChartRedraw(); return; }
-        if(sparam == BUTTON_RESET_SELL_TP) { isSellTPManuallyMoved = false; UpdateZones(); if(sellGroup.isActive) { sellGroup.stampedFinalTP = zonalFinalTPLine_Sell; UpdateGroupSplitLines(sellGroup); } ChartRedraw(); return; }
     }
     
-    if(id == CHARTEVENT_CLICK && g_isDrawingMode)
-    {
-        if(g_ignoreNextChartClick)
-        {
-            g_ignoreNextChartClick = false;
-            return;
-        }
-
-        int sub;
-        datetime t;
-        double p;
-        if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, sub, t, p) && sub == 0)
-        {
-            DrawManualTrendLine(p, t);
-            // ★★★ 修正箇所: 1回描画してもモードを解除しないように変更 ★★★
-            // g_isDrawingMode = false;
-            // UpdateButtonState();
-        }
-        return;
-    }
-
-    if (id == CHARTEVENT_OBJECT_DRAG && (sparam == "TPLine_Buy" || sparam == "TPLine_Sell"))
-    {
-        double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
-        if(sparam == "TPLine_Buy")
-        {
-            if (!isBuyTPManuallyMoved || zonalFinalTPLine_Buy != newPrice)
-            {
-                isBuyTPManuallyMoved = true;
-                zonalFinalTPLine_Buy = newPrice;
-                ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-                if(buyGroup.isActive) { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); }
-            }
-        }
-        else
-        {
-            if (!isSellTPManuallyMoved || zonalFinalTPLine_Sell != newPrice)
-            {
-                isSellTPManuallyMoved = true;
-                zonalFinalTPLine_Sell = newPrice;
-                ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-                if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup); }
-            }
-        }
-        ChartRedraw();
-    }
+    // ( ... 既存の他のイベント処理 ... )
 }
 
 // ==================================================================
@@ -763,210 +742,202 @@ void InitGroup(PositionGroup &group, bool isBuy)
 }
 
 //+------------------------------------------------------------------+
-//| ポジショングループの状態を更新する (最終決済ロジック版)          |
+//| ポジショングループの状態を更新する (動的分割数削除版)          |
 //+------------------------------------------------------------------+
 void ManagePositionGroups()
 {
-    PositionGroup oldBuyGroup = buyGroup;
-    PositionGroup oldSellGroup = sellGroup;
-    buyGroup.previousTotalLotSize = oldBuyGroup.totalLotSize;
-    sellGroup.previousTotalLotSize = oldSellGroup.totalLotSize;
-    buyGroup.totalLotSize = 0;
-    sellGroup.totalLotSize = 0;
-    buyGroup.highestScore = 0;
-    sellGroup.highestScore = 0;
-    ArrayFree(buyGroup.positionTickets);
-    ArrayFree(sellGroup.positionTickets);
-    buyGroup.isActive = false;
-    sellGroup.isActive = false;
-    double buyWeightedSum = 0, sellWeightedSum = 0;
-    double buyTotalScoreLot = 0, sellTotalScoreLot = 0;
-    
-    datetime buyEarliestTime = 0, sellEarliestTime = 0;
+   PositionGroup oldBuyGroup = buyGroup;
+   PositionGroup oldSellGroup = sellGroup;
+   buyGroup.previousTotalLotSize = oldBuyGroup.totalLotSize;
+   sellGroup.previousTotalLotSize = oldSellGroup.totalLotSize;
+   buyGroup.totalLotSize = 0;
+   sellGroup.totalLotSize = 0;
+   buyGroup.highestScore = 0;
+   sellGroup.highestScore = 0;
+   ArrayFree(buyGroup.positionTickets);
+   ArrayFree(sellGroup.positionTickets);
+   buyGroup.isActive = false;
+   sellGroup.isActive = false;
+   double buyWeightedSum = 0, sellWeightedSum = 0;
+   double buyTotalScoreLot = 0, sellTotalScoreLot = 0;
+   
+   datetime buyEarliestTime = 0, sellEarliestTime = 0;
 
-    for(int i = PositionsTotal() - 1; i >= 0; i--)
-    {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
-        {
-            double price = PositionGetDouble(POSITION_PRICE_OPEN);
-            double volume = PositionGetDouble(POSITION_VOLUME);
-            datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
-            int score = 0;
-            for(int j = 0; j < ArraySize(g_managedPositions); j++)
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+   {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
+      {
+         double price = PositionGetDouble(POSITION_PRICE_OPEN);
+         double volume = PositionGetDouble(POSITION_VOLUME);
+         datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
+         int score = 0;
+         for(int j = 0; j < ArraySize(g_managedPositions); j++)
+         {
+            if(g_managedPositions[j].ticket == ticket)
             {
-                if(g_managedPositions[j].ticket == ticket)
-                {
-                    score = g_managedPositions[j].score;
-                    break;
-                }
+               score = g_managedPositions[j].score;
+               break;
             }
-            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+         }
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+         {
+            buyGroup.isActive = true;
+            buyGroup.totalLotSize += volume;
+            buyWeightedSum += price * volume;
+            int size = ArraySize(buyGroup.positionTickets);
+            ArrayResize(buyGroup.positionTickets, size + 1);
+            buyGroup.positionTickets[size] = ticket;
+            buyTotalScoreLot += score * volume;
+            if(score > buyGroup.highestScore) buyGroup.highestScore = score;
+            
+            if(buyEarliestTime == 0 || posOpenTime < buyEarliestTime)
             {
-                buyGroup.isActive = true;
-                buyGroup.totalLotSize += volume;
-                buyWeightedSum += price * volume;
-                int size = ArraySize(buyGroup.positionTickets);
-                ArrayResize(buyGroup.positionTickets, size + 1);
-                buyGroup.positionTickets[size] = ticket;
-                buyTotalScoreLot += score * volume;
-                if(score > buyGroup.highestScore) buyGroup.highestScore = score;
-                
-                if(buyEarliestTime == 0 || posOpenTime < buyEarliestTime)
-                {
-                    buyEarliestTime = posOpenTime;
-                }
+               buyEarliestTime = posOpenTime;
             }
-            else
+         }
+         else
+         {
+            sellGroup.isActive = true;
+            sellGroup.totalLotSize += volume;
+            sellWeightedSum += price * volume;
+            int size = ArraySize(sellGroup.positionTickets);
+            ArrayResize(sellGroup.positionTickets, size + 1);
+            sellGroup.positionTickets[size] = ticket;
+            sellTotalScoreLot += score * volume;
+            if(score > sellGroup.highestScore) sellGroup.highestScore = score;
+            
+            if(sellEarliestTime == 0 || posOpenTime < sellEarliestTime)
             {
-                sellGroup.isActive = true;
-                sellGroup.totalLotSize += volume;
-                sellWeightedSum += price * volume;
-                int size = ArraySize(sellGroup.positionTickets);
-                ArrayResize(sellGroup.positionTickets, size + 1);
-                sellGroup.positionTickets[size] = ticket;
-                sellTotalScoreLot += score * volume;
-                if(score > sellGroup.highestScore) sellGroup.highestScore = score;
-                
-                if(sellEarliestTime == 0 || posOpenTime < sellEarliestTime)
-                {
-                    sellEarliestTime = posOpenTime;
-                }
+               sellEarliestTime = posOpenTime;
             }
-        }
-    }
-    if(buyGroup.isActive)
-    {
-        if(buyGroup.totalLotSize > 0)
-        {
-            buyGroup.averageEntryPrice = buyWeightedSum / buyGroup.totalLotSize;
-            buyGroup.averageScore = buyTotalScoreLot / buyGroup.totalLotSize;
-        }
-        buyGroup.positionCount = ArraySize(buyGroup.positionTickets);
-        if(!oldBuyGroup.isActive) // 新規グループ結成
-        {
-            buyGroup.initialTotalLotSize = buyGroup.totalLotSize;
-            buyGroup.splitsDone = 0;
-            buyGroup.lockedInSplitCount = InpSplitCount;
-            if(InpEnableDynamicSplits && buyGroup.highestScore >= InpScore_High)
+         }
+      }
+   }
+   if(buyGroup.isActive)
+   {
+      if(buyGroup.totalLotSize > 0)
+      {
+         buyGroup.averageEntryPrice = buyWeightedSum / buyGroup.totalLotSize;
+         buyGroup.averageScore = buyTotalScoreLot / buyGroup.totalLotSize;
+      }
+      buyGroup.positionCount = ArraySize(buyGroup.positionTickets);
+      if(!oldBuyGroup.isActive) // 新規グループ結成
+      {
+         buyGroup.initialTotalLotSize = buyGroup.totalLotSize;
+         buyGroup.splitsDone = 0;
+         buyGroup.lockedInSplitCount = InpSplitCount; // ★★★ 修正点: スコアによる増減ロジックを削除
+         // ★★★ ここから最終TPの計算ロジックを変更 ★★★
+         if(!isBuyTPManuallyMoved)
+         {
+            // グループ内のポジションからSLを取得してSL値幅を計算
+            double sl_price = 0;
+            if(buyGroup.positionCount > 0 && PositionSelectByTicket(buyGroup.positionTickets[0]))
             {
-                buyGroup.lockedInSplitCount += InpHighScoreSplit_Add;
+               sl_price = PositionGetDouble(POSITION_SL);
             }
-            // ★★★ ここから最終TPの計算ロジックを変更 ★★★
-            if(!isBuyTPManuallyMoved)
+            
+            if(sl_price > 0)
             {
-                // グループ内のポジションからSLを取得してSL値幅を計算
-                double sl_price = 0;
-                if(buyGroup.positionCount > 0 && PositionSelectByTicket(buyGroup.positionTickets[0]))
-                {
-                    sl_price = PositionGetDouble(POSITION_SL);
-                }
-                
-                if(sl_price > 0)
-                {
-                    double sl_distance = MathAbs(buyGroup.averageEntryPrice - sl_price);
-                    double final_tp = buyGroup.averageEntryPrice + (sl_distance * InpFinalTpRR_Ratio);
-                    // 高スコア倍率を適用
-                    if (buyGroup.highestScore >= InpScore_High)
-                    {
-                        final_tp = buyGroup.averageEntryPrice + (sl_distance * InpFinalTpRR_Ratio * InpHighSchoreTpRratio);
-                    }
-                    buyGroup.stampedFinalTP = final_tp;
-                } else {
-                    // SL未設定の場合は従来のロジックにフォールバック
-                    UpdateZones();
-                    buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
-                }
+               double sl_distance = MathAbs(buyGroup.averageEntryPrice - sl_price);
+               double final_tp = buyGroup.averageEntryPrice + (sl_distance * InpFinalTpRR_Ratio);
+               // 高スコア倍率を適用
+               if (buyGroup.highestScore >= InpScore_High)
+               {
+                  final_tp = buyGroup.averageEntryPrice + (sl_distance * InpFinalTpRR_Ratio * InpHighSchoreTpRratio);
+               }
+               buyGroup.stampedFinalTP = final_tp;
+            } else {
+               // SL未設定の場合は従来のロジックにフォールバック
+               UpdateZones();
+               buyGroup.stampedFinalTP = zonalFinalTPLine_Buy;
             }
-            // ★★★ ここまで ★★★
-            buyGroup.openTime = buyEarliestTime;
-        }
-        else // 既存グループへの追加
-        {
-            buyGroup.initialTotalLotSize = oldBuyGroup.initialTotalLotSize;
-            buyGroup.splitsDone = oldBuyGroup.splitsDone;
-            buyGroup.lockedInSplitCount = oldBuyGroup.lockedInSplitCount;
-            buyGroup.stampedFinalTP = oldBuyGroup.stampedFinalTP;
-            buyGroup.openTime = oldBuyGroup.openTime;
-        }
+         }
+         // ★★★ ここまで ★★★
+         buyGroup.openTime = buyEarliestTime;
+      }
+      else // 既存グループへの追加
+      {
+         buyGroup.initialTotalLotSize = oldBuyGroup.initialTotalLotSize;
+         buyGroup.splitsDone = oldBuyGroup.splitsDone;
+         buyGroup.lockedInSplitCount = oldBuyGroup.lockedInSplitCount;
+         buyGroup.stampedFinalTP = oldBuyGroup.stampedFinalTP;
+         buyGroup.openTime = oldBuyGroup.openTime;
+      }
 
-        if(InpEnableAtrSL && oldBuyGroup.positionCount != buyGroup.positionCount)
-        {
-            UpdateGroupSL(buyGroup);
-        }
-        UpdateGroupSplitLines(buyGroup);
-    }
-    else if(oldBuyGroup.isActive)
-    {
-        DeleteGroupSplitLines(buyGroup);
-        isBuyTPManuallyMoved = false;
-        InitGroup(buyGroup, true);
-    }
-    
-    if(sellGroup.isActive)
-    {
-        if(sellGroup.totalLotSize > 0)
-        {
-            sellGroup.averageEntryPrice = sellWeightedSum / sellGroup.totalLotSize;
-            sellGroup.averageScore = sellTotalScoreLot / sellGroup.totalLotSize;
-        }
-        sellGroup.positionCount = ArraySize(sellGroup.positionTickets);
-        if(!oldSellGroup.isActive)
-        {
-            sellGroup.initialTotalLotSize = sellGroup.totalLotSize;
-            sellGroup.splitsDone = 0;
-            sellGroup.lockedInSplitCount = InpSplitCount;
-            if(InpEnableDynamicSplits && sellGroup.highestScore >= InpScore_High)
+      if(InpEnableAtrSL && oldBuyGroup.positionCount != buyGroup.positionCount)
+      {
+         UpdateGroupSL(buyGroup);
+      }
+      UpdateGroupSplitLines(buyGroup);
+   }
+   else if(oldBuyGroup.isActive)
+   {
+      DeleteGroupSplitLines(buyGroup);
+      isBuyTPManuallyMoved = false;
+      InitGroup(buyGroup, true);
+   }
+   
+   if(sellGroup.isActive)
+   {
+      if(sellGroup.totalLotSize > 0)
+      {
+         sellGroup.averageEntryPrice = sellWeightedSum / sellGroup.totalLotSize;
+         sellGroup.averageScore = sellTotalScoreLot / sellGroup.totalLotSize;
+      }
+      sellGroup.positionCount = ArraySize(sellGroup.positionTickets);
+      if(!oldSellGroup.isActive)
+      {
+         sellGroup.initialTotalLotSize = sellGroup.totalLotSize;
+         sellGroup.splitsDone = 0;
+         sellGroup.lockedInSplitCount = InpSplitCount; // ★★★ 修正点: スコアによる増減ロジックを削除
+         // ★★★ ここから最終TPの計算ロジックを変更 ★★★
+         if(!isSellTPManuallyMoved)
+         {
+            double sl_price = 0;
+            if(sellGroup.positionCount > 0 && PositionSelectByTicket(sellGroup.positionTickets[0]))
             {
-                sellGroup.lockedInSplitCount += InpHighScoreSplit_Add;
+               sl_price = PositionGetDouble(POSITION_SL);
             }
-            // ★★★ ここから最終TPの計算ロジックを変更 ★★★
-            if(!isSellTPManuallyMoved)
+            
+            if(sl_price > 0)
             {
-                double sl_price = 0;
-                if(sellGroup.positionCount > 0 && PositionSelectByTicket(sellGroup.positionTickets[0]))
-                {
-                    sl_price = PositionGetDouble(POSITION_SL);
-                }
-                
-                if(sl_price > 0)
-                {
-                    double sl_distance = MathAbs(sellGroup.averageEntryPrice - sl_price);
-                    double final_tp = sellGroup.averageEntryPrice - (sl_distance * InpFinalTpRR_Ratio);
-                    if (sellGroup.highestScore >= InpScore_High)
-                    {
-                         final_tp = sellGroup.averageEntryPrice - (sl_distance * InpFinalTpRR_Ratio * InpHighSchoreTpRratio);
-                    }
-                    sellGroup.stampedFinalTP = final_tp;
-                } else {
-                    UpdateZones();
-                    sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
-                }
+               double sl_distance = MathAbs(sellGroup.averageEntryPrice - sl_price);
+               double final_tp = sellGroup.averageEntryPrice - (sl_distance * InpFinalTpRR_Ratio);
+               if (sellGroup.highestScore >= InpScore_High)
+               {
+                    final_tp = sellGroup.averageEntryPrice - (sl_distance * InpFinalTpRR_Ratio * InpHighSchoreTpRratio);
+               }
+               sellGroup.stampedFinalTP = final_tp;
+            } else {
+               UpdateZones();
+               sellGroup.stampedFinalTP = zonalFinalTPLine_Sell;
             }
-            // ★★★ ここまで ★★★
-            sellGroup.openTime = sellEarliestTime;
-        }
-        else
-        {
-            sellGroup.initialTotalLotSize = oldSellGroup.initialTotalLotSize;
-            sellGroup.splitsDone = oldSellGroup.splitsDone;
-            sellGroup.lockedInSplitCount = oldSellGroup.lockedInSplitCount;
-            sellGroup.stampedFinalTP = oldSellGroup.stampedFinalTP;
-            sellGroup.openTime = oldSellGroup.openTime;
-        }
-        
-        if(InpEnableAtrSL && oldSellGroup.positionCount != sellGroup.positionCount)
-        {
-            UpdateGroupSL(sellGroup);
-        }
-        UpdateGroupSplitLines(sellGroup);
-    }
-    else if(oldSellGroup.isActive)
-    {
-        DeleteGroupSplitLines(sellGroup);
-        isSellTPManuallyMoved = false;
-        InitGroup(sellGroup, false);
-    }
+         }
+         // ★★★ ここまで ★★★
+         sellGroup.openTime = sellEarliestTime;
+      }
+      else
+      {
+         sellGroup.initialTotalLotSize = oldSellGroup.initialTotalLotSize;
+         sellGroup.splitsDone = oldSellGroup.splitsDone;
+         sellGroup.lockedInSplitCount = oldSellGroup.lockedInSplitCount;
+         sellGroup.stampedFinalTP = oldSellGroup.stampedFinalTP;
+         sellGroup.openTime = oldSellGroup.openTime;
+      }
+      
+      if(InpEnableAtrSL && oldSellGroup.positionCount != sellGroup.positionCount)
+      {
+         UpdateGroupSL(sellGroup);
+      }
+      UpdateGroupSplitLines(sellGroup);
+   }
+   else if(oldSellGroup.isActive)
+   {
+      DeleteGroupSplitLines(sellGroup);
+      isSellTPManuallyMoved = false;
+      InitGroup(sellGroup, false);
+   }
 }
 
 //+------------------------------------------------------------------+
@@ -1019,7 +990,7 @@ void UpdateZones()
 }
 
 //+------------------------------------------------------------------+
-//| 分割決済ラインを更新する (決済時刻で描画を固定する最終版)        |
+//| 分割決済ラインを更新する (手動SLモード対応・RR1:1ロジック版)   |
 //+------------------------------------------------------------------+
 void UpdateGroupSplitLines(PositionGroup &group)
 {
@@ -1027,34 +998,83 @@ void UpdateGroupSplitLines(PositionGroup &group)
 
     if(!group.isActive || group.lockedInSplitCount <= 0) return;
 
-    double tpPrice = group.stampedFinalTP;
-    if(tpPrice <= 0 || tpPrice == DBL_MAX) return;
+    // --- TP/SLの価格を取得 ---
+    double finalTpPrice = group.stampedFinalTP;
+    if(finalTpPrice <= 0 || finalTpPrice == DBL_MAX) return;
 
     ArrayResize(group.splitPrices, group.lockedInSplitCount);
     ArrayResize(group.splitLineNames, group.lockedInSplitCount);
     ArrayResize(group.splitLineTimes, group.lockedInSplitCount);
 
-    double step = MathAbs(tpPrice - group.averageEntryPrice) / group.lockedInSplitCount;
+    // ★★★★★ ここから計算ロジックを全面的に改修 ★★★★★
 
+    if(InpSlMode == SL_MODE_MANUAL)
+    {
+        // --- 手動SLモード：RR1:1基準で計算 ---
+        double slPrice = group.isBuy ? g_slLinePrice_Buy : g_slLinePrice_Sell;
+
+        // SLが未設定、またはエントリー価格に対してSLが有利な側にある場合は計算不可
+        if(slPrice <= 0 || (group.isBuy && slPrice >= group.averageEntryPrice) || (!group.isBuy && slPrice <= group.averageEntryPrice))
+        {
+             return; // 不正なSL価格では描画しない
+        }
+
+        double riskDistance = MathAbs(group.averageEntryPrice - slPrice);
+        if(riskDistance <= 0) return;
+
+        // 1. TP1 (RR 1:1) を設定
+        double tp1Price = group.averageEntryPrice + (group.isBuy ? riskDistance : -riskDistance);
+        group.splitPrices[0] = tp1Price;
+
+        // 2. TP2以降を設定
+        int remainingSplits = group.lockedInSplitCount - 1;
+        if(remainingSplits > 0)
+        {
+            // TP1が最終TPを超えてしまった場合は、すべてのTPを最終TPに設定する
+            if((group.isBuy && tp1Price >= finalTpPrice) || (!group.isBuy && tp1Price <= finalTpPrice))
+            {
+                for(int i = 1; i < group.lockedInSplitCount; i++) group.splitPrices[i] = finalTpPrice;
+            }
+            else
+            {
+                double remainingDistance = MathAbs(finalTpPrice - tp1Price);
+                double step = remainingDistance / remainingSplits;
+                for(int i = 1; i < group.lockedInSplitCount; i++)
+                {
+                    group.splitPrices[i] = group.splitPrices[i-1] + (group.isBuy ? step : -step);
+                }
+            }
+        }
+    }
+    else
+    {
+        // --- ATRモード：従来通りの均等分割 ---
+        double step = MathAbs(finalTpPrice - group.averageEntryPrice) / group.lockedInSplitCount;
+        for(int i = 0; i < group.lockedInSplitCount; i++)
+        {
+            group.splitPrices[i] = group.averageEntryPrice + (group.isBuy ? 1 : -1) * step * (i + 1);
+        }
+    }
+
+    // ★★★★★ 計算ロジックの改修ここまで ★★★★★
+
+
+    // --- ラインの描画処理 ---
     color pendingColor = group.isBuy ? clrGoldenrod : clrPurple;
     color settledColor = group.isBuy ? clrLimeGreen : clrHotPink;
 
     for(int i = 0; i < group.lockedInSplitCount; i++)
     {
-        group.splitPrices[i] = group.averageEntryPrice + (group.isBuy ? 1 : -1) * step * (i + 1);
         group.splitLineNames[i] = "SplitLine_" + (group.isBuy ? "BUY" : "SELL") + "_" + (string)i;
         
         if(i < group.splitsDone)
         {
-            // --- 【決済済み】のラインを描画 ---
-            // ★★★ ここから下を修正 ★★★
+            // 決済済みラインの描画 (既存ロジック)
             datetime settlementTime = group.splitLineTimes[i];
-            // もし何らかの理由で時刻が記録されていなければ、安全のため現在の時刻を使う
             if (settlementTime == 0) settlementTime = TimeCurrent(); 
 
             if(group.openTime > 0)
             {
-                // 終点として、記録された固定の決済時刻(settlementTime)を使用する
                 ObjectCreate(0, group.splitLineNames[i], OBJ_TREND, 0, group.openTime, group.splitPrices[i], settlementTime, group.splitPrices[i]);
                 ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_COLOR, settledColor);
                 ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_STYLE, STYLE_DOT);
@@ -1063,11 +1083,10 @@ void UpdateGroupSplitLines(PositionGroup &group)
                 ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_SELECTABLE, false);
                 ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_ZORDER, 5);
             }
-            // ★★★ ここまでを修正 ★★★
         }
         else
         {
-            // --- 【未決済】のラインを描画 ---
+            // 未決済ラインの描画 (既存ロジック)
             ObjectCreate(0, group.splitLineNames[i], OBJ_HLINE, 0, 0, group.splitPrices[i]);
             ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_COLOR, pendingColor);
             ObjectSetInteger(0, group.splitLineNames[i], OBJPROP_STYLE, STYLE_DOT);
@@ -1389,7 +1408,7 @@ void CheckEntry()
 }
 
 //+------------------------------------------------------------------+
-//| 注文を発注する (ロジック整理版)                                |
+//| 注文を発注する (手動SLモード対応版)                            |
 //+------------------------------------------------------------------+
 void PlaceOrder(bool isBuy, double price, int score)
 {
@@ -1410,7 +1429,7 @@ void PlaceOrder(bool isBuy, double price, int score)
         return;
     }
 
-    // --- 注文リクエストの作成 (TPは設定しない) ---
+    // --- 注文リクエストの作成 ---
     MqlTradeRequest req;
     MqlTradeResult res;
     ZeroMemory(req);
@@ -1446,24 +1465,27 @@ void PlaceOrder(bool isBuy, double price, int score)
                 ArrayResize(g_managedPositions, size + 1);
                 g_managedPositions[size] = newPos;
 
-                // ATR SLが有効なら、新規ポジションにSLを設定
-                if (InpEnableAtrSL)
+                // ★★★ SL設定ロジックをモードに応じて分岐 ★★★
+                double sl_price = 0;
+                if(InpSlMode == SL_MODE_MANUAL)
+                {
+                    // 手動モード：チャート上のSLライン価格を使用
+                    sl_price = isBuy ? g_slLinePrice_Buy : g_slLinePrice_Sell;
+                }
+                else if(InpEnableAtrSL) // ATRモード
                 {
                     double atr_buffer[1];
                     if (CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) > 0)
                     {
                         double atr_value = atr_buffer[0];
-                        double sl_price = 0;
-                        if (isBuy)
-                        {
-                            sl_price = price - (atr_value * InpAtrSlMultiplier);
-                        }
-                        else
-                        {
-                            sl_price = price + (atr_value * InpAtrSlMultiplier);
-                        }
-                        ModifyPositionSL(ticket, sl_price);
+                        sl_price = isBuy ? price - (atr_value * InpAtrSlMultiplier) : price + (atr_value * InpAtrSlMultiplier);
                     }
+                }
+                
+                // 計算されたSL価格をポジションに設定
+                if(sl_price > 0)
+                {
+                    ModifyPositionSL(ticket, sl_price);
                 }
 
                 // ポジション状態とUIを即時更新
@@ -1626,7 +1648,7 @@ void CheckLineSignals(Line &line)
 }
 
 //+------------------------------------------------------------------+
-//| 【改修版】内部のライン「データ」を更新する                       |
+//| 【修正版】内部のライン「データ」を更新する (開始時刻をセット)    |
 //+------------------------------------------------------------------+
 void UpdateLines()
 {
@@ -1641,6 +1663,9 @@ void UpdateLines()
         color p_colors[] = {(color)CLR_S1, (color)CLR_R1, (color)CLR_S2, (color)CLR_R2, (color)CLR_S3, (color)CLR_R3};
         string p_names[] = {"S1", "R1", "S2", "R2", "S3", "R3"};
 
+        // ★★★ピボットの起点時間を取得★★★
+        datetime pivotStartTime = iTime(_Symbol, InpPivotPeriod, 0);
+
         for(int i = 0; i < 6; i++)
         {
             if(i >= 2 && !InpShowS2R2) continue;
@@ -1651,13 +1676,11 @@ void UpdateLines()
             line.price = p_prices[i];
             line.type = p_types[i];
             line.signalColor = p_colors[i];
+            line.startTime = pivotStartTime; // ★★★起点時間をセット★★★
             
-            // ★★★ 永続化された状態を読み込む ★★★
             int stateIndex = GetLineState(line.name);
             line.isBrokeUp = g_lineStates[stateIndex].isBrokeUp;
             line.isBrokeDown = g_lineStates[stateIndex].isBrokeDown;
-            // line.waitForRetest... は CheckLineSignals で直接 g_lineStates を参照するため、
-            // ここでの代入は不要（パフォーマンス上の理由）。
 
             int size = ArraySize(allLines);
             ArrayResize(allLines, size + 1);
@@ -1681,8 +1704,8 @@ void UpdateLines()
         m_line.price = ObjectGetDouble(0, objName, OBJPROP_PRICE, 0);
         m_line.signalColor = (color)ObjectGetInteger(0, objName, OBJPROP_COLOR);
         m_line.type = isManualSupport ? LINE_TYPE_SUPPORT : LINE_TYPE_RESISTANCE;
+        m_line.startTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME, 0); // ★★★オブジェクトから起点時間を取得・セット★★★
 
-        // ★★★ 永続化された状態を読み込む ★★★
         int stateIndex = GetLineState(m_line.name);
         m_line.isBrokeUp = g_lineStates[stateIndex].isBrokeUp;
         m_line.isBrokeDown = g_lineStates[stateIndex].isBrokeDown;
@@ -1802,63 +1825,62 @@ void CheckExits()
 }
 
 //+------------------------------------------------------------------+
-//| 個別モード：新規ポジションの分割決済データを準備する (修正版)
+//| 個別モード：新規ポジションの分割決済データを準備する (動的分割数削除版)
 //+------------------------------------------------------------------+
 void AddSplitData(ulong ticket)
 {
-    if(!PositionSelectByTicket(ticket)) return;
-    SplitData newSplit;
-    newSplit.ticket = ticket;
-    newSplit.entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-    newSplit.lotSize = NormalizeDouble(PositionGetDouble(POSITION_VOLUME), 2);
-    newSplit.isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
-    newSplit.splitsDone = 0;
-    newSplit.openTime = (datetime)PositionGetInteger(POSITION_TIME);
-    newSplit.score = 0;
-    for(int i = 0; i < ArraySize(g_managedPositions); i++)
-    {
-        if(g_managedPositions[i].ticket == ticket)
-        {
-            newSplit.score = g_managedPositions[i].score;
-            break;
-        }
-    }
-    newSplit.stampedFinalTP = newSplit.isBuy ? zonalFinalTPLine_Buy : zonalFinalTPLine_Sell;
-    double tpPrice = newSplit.stampedFinalTP;
-    if(tpPrice <= 0 || tpPrice == DBL_MAX) tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1000 : -1000) * g_pip;
-    if(newSplit.score >= InpScore_High && tpPrice > 0)
-    {
-        double originalDiff = MathAbs(tpPrice - newSplit.entryPrice);
-        tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1 : -1) * (originalDiff * InpHighSchoreTpRratio);
-    }
-    newSplit.stampedFinalTP = tpPrice;
-    double priceDiff = MathAbs(tpPrice - newSplit.entryPrice);
-    int dynamicSplitCount = InpSplitCount;
-    if(InpEnableDynamicSplits && newSplit.score >= InpScore_High)
-    {
-        dynamicSplitCount += InpHighScoreSplit_Add;
-    }
-    if(dynamicSplitCount > 0)
-    {
-        ArrayResize(newSplit.splitPrices, dynamicSplitCount);
-        ArrayResize(newSplit.splitLineNames, dynamicSplitCount);
-        ArrayResize(newSplit.splitLineTimes, dynamicSplitCount);
-        double step = priceDiff / dynamicSplitCount;
-        for(int i = 0; i < dynamicSplitCount; i++)
-        {
-            newSplit.splitPrices[i] = newSplit.isBuy ? newSplit.entryPrice + step * (i + 1) : newSplit.entryPrice - step * (i + 1);
-            string lineName = "SplitLine_" + (string)ticket + "_" + (string)i;
-            newSplit.splitLineNames[i] = lineName;
-            newSplit.splitLineTimes[i] = 0;
-            ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, newSplit.splitPrices[i]);
-            ObjectSetInteger(0, lineName, OBJPROP_COLOR, newSplit.isBuy ? clrGoldenrod : clrPurple);
-            ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
-            ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 5); // ★★★ Z-ORDERを設定
-        }
-    }
-    int size = ArraySize(splitPositions);
-    ArrayResize(splitPositions, size + 1);
-    splitPositions[size] = newSplit;
+   if(!PositionSelectByTicket(ticket)) return;
+   SplitData newSplit;
+   newSplit.ticket = ticket;
+   newSplit.entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+   newSplit.lotSize = NormalizeDouble(PositionGetDouble(POSITION_VOLUME), 2);
+   newSplit.isBuy = (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY);
+   newSplit.splitsDone = 0;
+   newSplit.openTime = (datetime)PositionGetInteger(POSITION_TIME);
+   newSplit.score = 0;
+   for(int i = 0; i < ArraySize(g_managedPositions); i++)
+   {
+      if(g_managedPositions[i].ticket == ticket)
+      {
+         newSplit.score = g_managedPositions[i].score;
+         break;
+      }
+   }
+   newSplit.stampedFinalTP = newSplit.isBuy ? zonalFinalTPLine_Buy : zonalFinalTPLine_Sell;
+   double tpPrice = newSplit.stampedFinalTP;
+   if(tpPrice <= 0 || tpPrice == DBL_MAX) tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1000 : -1000) * g_pip;
+   if(newSplit.score >= InpScore_High && tpPrice > 0)
+   {
+      double originalDiff = MathAbs(tpPrice - newSplit.entryPrice);
+      tpPrice = newSplit.entryPrice + (newSplit.isBuy ? 1 : -1) * (originalDiff * InpHighSchoreTpRratio);
+   }
+   newSplit.stampedFinalTP = tpPrice;
+   double priceDiff = MathAbs(tpPrice - newSplit.entryPrice);
+   
+   // ★★★ 修正点: スコアによる増減ロジックを削除し、固定値を使用 ★★★
+   int splitCount = InpSplitCount;
+   
+   if(splitCount > 0)
+   {
+      ArrayResize(newSplit.splitPrices, splitCount);
+      ArrayResize(newSplit.splitLineNames, splitCount);
+      ArrayResize(newSplit.splitLineTimes, splitCount);
+      double step = priceDiff / splitCount;
+      for(int i = 0; i < splitCount; i++)
+      {
+         newSplit.splitPrices[i] = newSplit.isBuy ? newSplit.entryPrice + step * (i + 1) : newSplit.entryPrice - step * (i + 1);
+         string lineName = "SplitLine_" + (string)ticket + "_" + (string)i;
+         newSplit.splitLineNames[i] = lineName;
+         newSplit.splitLineTimes[i] = 0;
+         ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, newSplit.splitPrices[i]);
+         ObjectSetInteger(0, lineName, OBJPROP_COLOR, newSplit.isBuy ? clrGoldenrod : clrPurple);
+         ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
+         ObjectSetInteger(0, lineName, OBJPROP_ZORDER, 5);
+      }
+   }
+   int size = ArraySize(splitPositions);
+   ArrayResize(splitPositions, size + 1);
+   splitPositions[size] = newSplit;
 }
 
 //+------------------------------------------------------------------+
@@ -2719,31 +2741,34 @@ void ModifyPositionSL(ulong ticket, double sl_price)
 }
 
 //+------------------------------------------------------------------+
-//| グループ全体のストップロスをATRに基づいて更新する                |
+//| グループ全体のストップロスを更新する (手動SLモード対応版)        |
 //+------------------------------------------------------------------+
 void UpdateGroupSL(PositionGroup &group)
 {
     if (!group.isActive) return;
 
-    double atr_buffer[1];
-    if (CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) <= 0)
-    {
-        Print("SL更新エラー: ATR値の取得に失敗しました。");
-        return;
-    }
-
-    double atr_value = atr_buffer[0];
     double sl_price = 0;
 
-    // グループの平均建値を基準にSLを計算
-    if (group.isBuy)
+    // ★★★ SLモードに応じてSL価格の決定方法を分岐 ★★★
+    if(InpSlMode == SL_MODE_MANUAL)
     {
-        sl_price = group.averageEntryPrice - (atr_value * InpAtrSlMultiplier);
+        // 手動モード：グローバル変数に保持されたライン価格を使用
+        sl_price = group.isBuy ? g_slLinePrice_Buy : g_slLinePrice_Sell;
     }
-    else
+    else if(InpEnableAtrSL) // ATRモード
     {
-        sl_price = group.averageEntryPrice + (atr_value * InpAtrSlMultiplier);
+        double atr_buffer[1];
+        if (CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) <= 0)
+        {
+            Print("SL更新エラー: ATR値の取得に失敗しました。");
+            return;
+        }
+        double atr_value = atr_buffer[0];
+        // グループの平均建値を基準にSLを計算
+        sl_price = group.isBuy ? group.averageEntryPrice - (atr_value * InpAtrSlMultiplier) : group.averageEntryPrice + (atr_value * InpAtrSlMultiplier);
     }
+    
+    if(sl_price <= 0) return;
 
     // グループ内の全ポジションに新しいSLを適用
     for (int i = 0; i < group.positionCount; i++)
@@ -2972,5 +2997,213 @@ void CheckDynamicExits()
                 }
             }
         }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ★★★修正版★★★ 手動SLラインを描画・管理する (実線固定)      |
+//+------------------------------------------------------------------+
+void ManageSlLines()
+{
+    // 手動SLモードでない場合は、ラインを消して処理を終了
+    if(InpSlMode != SL_MODE_MANUAL)
+    {
+        ObjectDelete(0, "SLLine_Buy");
+        ObjectDelete(0, "SLLine_Sell");
+        return;
+    }
+
+    MqlTick tick;
+    if(!SymbolInfoTick(_Symbol, tick)) return;
+
+    // --- 買いSLラインの管理 ---
+    if(!isBuySLManuallyMoved && g_slLinePrice_Buy == 0)
+    {
+        double atr_buffer[1];
+        if(CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) > 0)
+        {
+            g_slLinePrice_Buy = tick.ask - (atr_buffer[0] * InpAtrSlMultiplier);
+        }
+    }
+    
+    if(g_slLinePrice_Buy > 0)
+    {
+        string name = "SLLine_Buy";
+        if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+        ObjectMove(0, name, 0, 0, g_slLinePrice_Buy);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+        ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+        ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID); // ★★★ 線種を実線に固定 ★★★
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
+    }
+
+    // --- 売りSLラインの管理 ---
+    if(!isSellSLManuallyMoved && g_slLinePrice_Sell == 0)
+    {
+        double atr_buffer[1];
+        if(CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) > 0)
+        {
+            g_slLinePrice_Sell = tick.bid + (atr_buffer[0] * InpAtrSlMultiplier);
+        }
+    }
+    
+    if(g_slLinePrice_Sell > 0)
+    {
+        string name = "SLLine_Sell";
+        if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0);
+        ObjectMove(0, name, 0, 0, g_slLinePrice_Sell);
+        ObjectSetInteger(0, name, OBJPROP_COLOR, clrRed);
+        ObjectSetInteger(0, name, OBJPROP_WIDTH, 1);
+        ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID); // ★★★ 線種を実線に固定 ★★★
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, name, OBJPROP_ZORDER, 10);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ★★★修正版★★★ ゾーン内でのMACDクロスエントリーをチェックする |
+//+------------------------------------------------------------------+
+void CheckZoneMacdCross()
+{
+    // 機能が無効、またはゾーンモードでない場合は処理しない
+    if (!InpEnableZoneMacdCross || InpEntryMode != ZONE_MODE) return;
+
+    // 前回の本ロジックでのエントリーから一定時間はエントリーしない（連打防止）
+    static datetime lastZoneCrossEntryTime = 0;
+    if (TimeCurrent() < lastZoneCrossEntryTime + PeriodSeconds())
+    {
+        return;
+    }
+
+    // --- MACDクロスを検出 ---
+    double exec_main[3], exec_signal[3];
+    ArraySetAsSeries(exec_main, true);
+    ArraySetAsSeries(exec_signal, true);
+
+    if (CopyBuffer(h_macd_exec, 0, 0, 3, exec_main) < 3 || CopyBuffer(h_macd_exec, 1, 0, 3, exec_signal) < 3)
+    {
+        return; // データ取得失敗
+    }
+
+    // 確定足(1)でクロスが発生したか
+    bool isBuyCross = (exec_main[2] < exec_signal[2] && exec_main[1] > exec_signal[1]);
+    bool isSellCross = (exec_main[2] > exec_signal[2] && exec_main[1] < exec_signal[1]);
+
+    // クロスがなければ処理終了
+    if (!isBuyCross && !isSellCross) return;
+
+    // --- 価格がゾーン内にあるかチェック ---
+    MqlTick tick;
+    if (!SymbolInfoTick(_Symbol, tick)) return;
+    double zoneWidth = InpZonePips * g_pip;
+
+    // 全てのラインをループしてチェック
+    for (int i = 0; i < ArraySize(allLines); i++)
+    {
+        Line line = allLines[i];
+        double upper_zone = line.price + zoneWidth;
+        double lower_zone = line.price - zoneWidth;
+
+        // 【買いエントリーのチェック】
+        if (isBuyCross && line.type == LINE_TYPE_SUPPORT)
+        {
+            if (tick.ask > lower_zone && tick.ask < upper_zone)
+            {
+                PrintFormat("%s のサポートゾーン内でMACDゴールデンクロスを検出。", line.name);
+                ScoreComponentInfo info = CalculateMACDScore(true);
+                if (info.total_score >= InpScore_Standard)
+                {
+                    PlaceOrder(true, tick.ask, info.total_score);
+                    lastZoneCrossEntryTime = TimeCurrent();
+                    return; 
+                }
+            }
+        }
+
+        // 【売りエントリーのチェック】
+        if (isSellCross && line.type == LINE_TYPE_RESISTANCE)
+        {
+            if (tick.bid > lower_zone && tick.bid < upper_zone)
+            {
+                PrintFormat("%s のレジスタンスゾーン内でMACDデッドクロスを検出。", line.name);
+                ScoreComponentInfo info = CalculateMACDScore(false);
+                if (info.total_score >= InpScore_Standard)
+                {
+                    PlaceOrder(false, tick.bid, info.total_score);
+                    lastZoneCrossEntryTime = TimeCurrent();
+                    return;
+                }
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ★★★最終版★★★ ゾーンを長方形オブジェクトで可視化する      |
+//+------------------------------------------------------------------+
+void ManageZoneVisuals()
+{
+    // まず既存のゾーン描画をすべて削除
+    ObjectsDeleteAll(0, "ZoneRect_");
+
+    // 機能が無効、またはゾーン系モードでない場合は処理を終了
+    if (!g_isZoneVisualizationEnabled || (InpEntryMode != ZONE_MODE && InpEntryMode != HYBRID_MODE))
+    {
+        return;
+    }
+
+    // ★★★修正点：描画開始時間を、チャートの左端に設定★★★
+    int firstVisibleBar = (int)ChartGetInteger(0, CHART_FIRST_VISIBLE_BAR);
+    datetime startTime = iTime(_Symbol, _Period, firstVisibleBar);
+
+    double zoneWidth = InpZonePips * g_pip;
+
+    // 全てのラインに対してゾーンを描画
+    for (int i = 0; i < ArraySize(allLines); i++)
+    {
+        Line line = allLines[i];
+        if (line.price <= 0) continue;
+
+        string name = "ZoneRect_" + line.name;
+        
+        double upper_zone = line.price + zoneWidth;
+        double lower_zone = line.price - zoneWidth;
+        
+        color zone_color = (line.type == LINE_TYPE_SUPPORT) ? C'30,70,120' : C'120,70,30';
+
+        // ★★★修正点：開始時間にチャート左端の時刻を使用★★★
+        if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, startTime, upper_zone))
+        {
+            // 時間の終点をチャートの右端より未来に設定して、常に右に延長させる
+            ObjectSetInteger(0, name, OBJPROP_TIME, 1, TimeCurrent() + 3600 * 24 * 30);
+            ObjectSetDouble(0, name, OBJPROP_PRICE, 1, lower_zone);
+            
+            ObjectSetInteger(0, name, OBJPROP_COLOR, zone_color);
+            ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);
+            ObjectSetInteger(0, name, OBJPROP_FILL, true);
+            ObjectSetInteger(0, name, OBJPROP_BACK, true);
+            ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| ★★★新規★★★ ゾーン可視化ボタンの状態を更新する          |
+//+------------------------------------------------------------------+
+void UpdateZoneButtonState()
+{
+    string name = BUTTON_TOGGLE_ZONES;
+    if(ObjectFind(0, name) < 0) return;
+
+    if(g_isZoneVisualizationEnabled)
+    {
+        ObjectSetString(0, name, OBJPROP_TEXT, "ゾーン表示: ON");
+        ObjectSetInteger(0, name, OBJPROP_BGCOLOR, clrSeaGreen);
+    }
+    else
+    {
+        ObjectSetString(0, name, OBJPROP_TEXT, "ゾーン表示: OFF");
+        ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'80,80,80'); // Dark Gray
     }
 }

@@ -1,5 +1,5 @@
 //+------------------------------------------------------------------+
-//|                                                   ApexFlowEA.mq5 |
+//|                                               Git ApexFlowEA.mq5 |
 //|                                      (ZoneEntry + ZephyrSplit)   |
 //|                                    Final Corrected Version: 4.0  |
 //+------------------------------------------------------------------+
@@ -35,18 +35,19 @@ enum ENUM_LINE_TYPE
     LINE_TYPE_RESISTANCE
 };
 
-// ライン情報を一元管理するための構造体
+// ライン情報を一元管理するための構造体 (ブレイク時刻追加版)
 struct Line
 {
-    string         name;
-    double         price;
+    string      name;
+    double      price;
     ENUM_LINE_TYPE type;
-    color          signalColor;
-    datetime       startTime; // ★★★起点時刻を記憶するメンバ★★★
-    bool           isBrokeUp;
-    bool           isBrokeDown;
-    bool           waitForRetest;
-    bool           isInZone;
+    color       signalColor;
+    datetime    startTime;
+    datetime    breakTime; // ★★★追加: ブレイクした正確な時刻を記憶するメンバ★★★
+    bool        isBrokeUp;
+    bool        isBrokeDown;
+    bool        waitForRetest;
+    bool        isInZone;
 };
 
 // 保有ポジションの情報を管理するための構造体
@@ -616,80 +617,236 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 //| エキスパート初期化関数 (全機能統合・最終版)
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| エキスパート初期化関数 (タイムラグ対策版)                        |
+//+------------------------------------------------------------------+
 int OnInit()
 {
-   ArrayResize(g_lineStates, 0);
-   g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
-   g_lastBarTime = 0;
-   lastTradeTime = 0;
-   g_lastPivotDrawTime = 0; 
+    ArrayResize(g_lineStates, 0);
+    g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
+    g_lastBarTime = 0;
+    lastTradeTime = 0;
+    g_lastPivotDrawTime = 0; 
 
-   h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
-   h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
-   h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
-   h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
-   h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
-   zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-   h_adx = iADX(_Symbol, InpAdxTimeframe, InpAdxPeriod);
-   
-   if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_adx == INVALID_HANDLE)
-   {
-      Print("インジケータハンドルの作成に失敗しました。");
-      return(INIT_FAILED);
-   }
-   
-   if (InpPositionMode == MODE_AGGREGATE) { InitGroup(buyGroup, true); InitGroup(sellGroup, false); }
-   else { ArrayResize(splitPositions, 0); }
-   isBuyTPManuallyMoved = false;
-   isSellTPManuallyMoved = false;
-   
-   g_isZoneVisualizationEnabled = InpVisualizeZones;
+    h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
+    h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
+    h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
+    h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
+    h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
+    zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
+    h_adx = iADX(_Symbol, InpAdxTimeframe, InpAdxPeriod);
+    
+    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_adx == INVALID_HANDLE)
+    {
+        Print("インジケータハンドルの作成に失敗しました。");
+        return(INIT_FAILED);
+    }
+    
+    if (InpPositionMode == MODE_AGGREGATE) { InitGroup(buyGroup, true); InitGroup(sellGroup, false); }
+    else { ArrayResize(splitPositions, 0); }
+    isBuyTPManuallyMoved = false;
+    isSellTPManuallyMoved = false;
+    
+    g_isZoneVisualizationEnabled = InpVisualizeZones;
 
-   if(InpEnableButtons)
-   {
-      CreateManualLineButton(); CreateClearButton(); CreateClearLinesButton();
-      CreateApexButton(BUTTON_BUY_CLOSE_ALL, 140, 50, 100, 20, "BUY 全決済", clrDodgerBlue);
-      CreateApexButton(BUTTON_SELL_CLOSE_ALL, 140, 75, 100, 20, "SELL 全決済", clrTomato);
-      CreateApexButton(BUTTON_ALL_CLOSE, 245, 50, 100, 20, "全決済", clrGray);
-      CreateApexButton(BUTTON_RESET_BUY_TP, 245, 75, 100, 20, "BUY TPリセット", clrGoldenrod);
-      CreateApexButton(BUTTON_RESET_SELL_TP, 245, 100, 100, 20, "SELL TPリセット", clrGoldenrod);
-      CreateApexButton(BUTTON_RESET_BUY_SL, 350, 75, 100, 20, "BUY SLリセット", clrDarkOrange);
-      CreateApexButton(BUTTON_RESET_SELL_SL, 350, 100, 100, 20, "SELL SLリセット", clrDarkOrange);
-      CreateApexButton(BUTTON_TOGGLE_ZONES, 10, 130, 120, 20, "ゾーン表示", C'80,80,80');
-      UpdateZoneButtonState();
-   }
+    if(InpEnableButtons)
+    {
+        CreateManualLineButton(); CreateClearButton(); CreateClearLinesButton();
+        CreateApexButton(BUTTON_BUY_CLOSE_ALL, 140, 50, 100, 20, "BUY 全決済", clrDodgerBlue);
+        CreateApexButton(BUTTON_SELL_CLOSE_ALL, 140, 75, 100, 20, "SELL 全決済", clrTomato);
+        CreateApexButton(BUTTON_ALL_CLOSE, 245, 50, 100, 20, "全決済", clrGray);
+        CreateApexButton(BUTTON_RESET_BUY_TP, 245, 75, 100, 20, "BUY TPリセット", clrGoldenrod);
+        CreateApexButton(BUTTON_RESET_SELL_TP, 245, 100, 100, 20, "SELL TPリセット", clrGoldenrod);
+        CreateApexButton(BUTTON_RESET_BUY_SL, 350, 75, 100, 20, "BUY SLリセット", clrDarkOrange);
+        CreateApexButton(BUTTON_RESET_SELL_SL, 350, 100, 100, 20, "SELL SLリセット", clrDarkOrange);
+        CreateApexButton(BUTTON_TOGGLE_ZONES, 10, 130, 120, 20, "ゾーン表示", C'80,80,80');
+        UpdateZoneButtonState();
+    }
 
-   ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
-   
-   prev_tp_mode = InpTPLineMode;
-   prev_tp_timeframe = InpTP_Timeframe;
-   
-   Print("ApexFlowEA v4.0 初期化完了");
-   return(INIT_SUCCEEDED);
+    ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
+    
+    prev_tp_mode = InpTPLineMode;
+    prev_tp_timeframe = InpTP_Timeframe;
+    
+    // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    // ★★★ タイムラグ問題の恒久対策 ★★★
+    // EA起動時に一度、ライン情報を読み込んでおく
+    UpdateLines();
+    // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+    
+    Print("ApexFlowEA v4.0 初期化完了");
+    return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| チャートイベント処理関数 (ゾーンボタン対応)
+//| チャートイベント処理関数 (全てのボタン処理を網羅した修正版)       |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| チャートイベント処理関数 (座標変換ロジックを追加した最終版)       |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
+    // --- (1) オブジェクトのクリックイベント ---
     if(id == CHARTEVENT_OBJECT_CLICK)
     {
-        // ( ... 既存のボタンクリック処理 ... )
-        if(sparam == BUTTON_RESET_SELL_SL) { isSellSLManuallyMoved = false; g_slLinePrice_Sell = 0; ManageSlLines(); if(sellGroup.isActive){ UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); } ChartRedraw(); return; }
+        // --- 手動ライン描画ボタン ---
+        if(sparam == g_buttonName)
+        {
+            g_isDrawingMode = !g_isDrawingMode;
+            if(g_isDrawingMode)
+            {
+                g_ignoreNextChartClick = true;
+            }
+            UpdateButtonState();
+            return;
+        }
+
+        // --- シグナル消去ボタン ---
+        if(sparam == g_clearButtonName)
+        {
+            ClearSignalObjects();
+            return;
+        }
         
-        // ★★★追加: ゾーン可視化ボタンのクリック処理★★★
+        // --- 手動ライン消去ボタン ---
+        if(sparam == g_clearLinesButtonName)
+        {
+            ClearManualLines();
+            return;
+        }
+
+        // --- 各種決済ボタン ---
+        if(sparam == BUTTON_BUY_CLOSE_ALL)  { CloseAllPositionsInGroup(buyGroup); return; }
+        if(sparam == BUTTON_SELL_CLOSE_ALL) { CloseAllPositionsInGroup(sellGroup); return; }
+        if(sparam == BUTTON_ALL_CLOSE)
+        {
+            CloseAllPositionsInGroup(buyGroup);
+            CloseAllPositionsInGroup(sellGroup);
+            return;
+        }
+
+        // --- TPリセットボタン ---
+        if(sparam == BUTTON_RESET_BUY_TP)
+        {
+            isBuyTPManuallyMoved = false;
+            UpdateZones();
+            if(buyGroup.isActive) { ManagePositionGroups(); }
+            ChartRedraw();
+            return;
+        }
+        if(sparam == BUTTON_RESET_SELL_TP)
+        {
+            isSellTPManuallyMoved = false;
+            UpdateZones();
+            if(sellGroup.isActive) { ManagePositionGroups(); }
+            ChartRedraw();
+            return;
+        }
+        
+        // --- SLリセットボタン ---
+        if(sparam == BUTTON_RESET_BUY_SL) 
+        { 
+            isBuySLManuallyMoved = false; 
+            g_slLinePrice_Buy = 0; 
+            ManageSlLines(); 
+            if(buyGroup.isActive){ UpdateGroupSL(buyGroup); UpdateGroupSplitLines(buyGroup); } 
+            ChartRedraw(); 
+            return; 
+        }
+        if(sparam == BUTTON_RESET_SELL_SL) 
+        { 
+            isSellSLManuallyMoved = false; 
+            g_slLinePrice_Sell = 0; 
+            ManageSlLines(); 
+            if(sellGroup.isActive){ UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); } 
+            ChartRedraw(); 
+            return; 
+        }
+        
+        // --- ゾーン表示切替ボタン ---
         if(sparam == BUTTON_TOGGLE_ZONES)
         {
-            g_isZoneVisualizationEnabled = !g_isZoneVisualizationEnabled; // 状態を反転
-            UpdateZoneButtonState(); // ボタンの表示を更新
-            ManageZoneVisuals();     // ゾーンの表示/非表示を即時反映
+            g_isZoneVisualizationEnabled = !g_isZoneVisualizationEnabled;
+            UpdateZoneButtonState();
+            ManageZoneVisuals();
             ChartRedraw();
             return;
         }
     }
+
+    // --- (2) チャート自体のクリックイベント ---
+    if(id == CHARTEVENT_CLICK)
+    {
+        if(g_ignoreNextChartClick)
+        {
+            g_ignoreNextChartClick = false;
+            return;
+        }
+        
+        if(g_isDrawingMode)
+        {
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            // ★★★ ここが今回の最重要修正ポイントです ★★★
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            datetime clicked_time;
+            double   clicked_price;
+            int      subwindow;
+
+            // マウスクリックのピクセル座標(lparam, dparam)を、チャートの「時間と価格」に変換する
+            if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, subwindow, clicked_time, clicked_price))
+            {
+                // 変換に成功した場合のみ描画を実行
+                DrawManualTrendLine(clicked_price, clicked_time);
+            }
+            else
+            {
+                Print("座標から時間/価格への変換に失敗しました。ラインは描画されません。");
+            }
+            
+            g_isDrawingMode = false; // 描画モードをOFFにする
+            UpdateButtonState();     // ボタンの状態を元に戻す
+        }
+        return;
+    }
     
-    // ( ... 既存の他のイベント処理 ... )
+    // --- (3) オブジェクトのドラッグイベント (手動TP/SLの移動検知) ---
+    if(id == CHARTEVENT_OBJECT_DRAG)
+    {
+        if(sparam == "TPLine_Buy")  isBuyTPManuallyMoved = true;
+        if(sparam == "TPLine_Sell") isSellTPManuallyMoved = true;
+        if(sparam == "SLLine_Buy")  isBuySLManuallyMoved = true;
+        if(sparam == "SLLine_Sell") isSellSLManuallyMoved = true;
+        return;
+    }
+
+    // --- (4) オブジェクトの編集終了イベント (手動TP/SLの移動確定) ---
+    if(id == CHARTEVENT_OBJECT_ENDEDIT)
+    {
+        if(StringFind(sparam, "TPLine_") == 0)
+        {
+             double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
+             if(sparam == "TPLine_Buy")  { zonalFinalTPLine_Buy  = newPrice; if(buyGroup.isActive)  { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); } }
+             if(sparam == "TPLine_Sell") { zonalFinalTPLine_Sell = newPrice; if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup);} }
+             UpdateZones();
+             ChartRedraw();
+        }
+        if(StringFind(sparam, "SLLine_") == 0)
+        {
+            double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
+            if(sparam == "SLLine_Buy")
+            {
+                g_slLinePrice_Buy = newPrice;
+                if(buyGroup.isActive) { UpdateGroupSL(buyGroup); UpdateGroupSplitLines(buyGroup); }
+            }
+            if(sparam == "SLLine_Sell")
+            {
+                g_slLinePrice_Sell = newPrice;
+                if(sellGroup.isActive) { UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); }
+            }
+            ChartRedraw();
+        }
+        return;
+    }
 }
 
 // ==================================================================
@@ -1506,7 +1663,7 @@ void CheckLineSignals(Line &line)
 }
 
 //+------------------------------------------------------------------+
-//| 【修正版】内部のライン「データ」を更新する (開始時刻をセット)    |
+//| 内部のライン「データ」を更新する (ブレイク時刻対応・名前バグ修正版) |
 //+------------------------------------------------------------------+
 void UpdateLines()
 {
@@ -1531,10 +1688,11 @@ void UpdateLines()
             line.price = p_prices[i];
             line.type = p_types[i];
             line.signalColor = p_colors[i];
-            line.startTime = pivotStartTime; // ★ピボットの起点時間をセット
+            line.startTime = pivotStartTime;
             int stateIndex = GetLineState(line.name);
             line.isBrokeUp = g_lineStates[stateIndex].isBrokeUp;
             line.isBrokeDown = g_lineStates[stateIndex].isBrokeDown;
+            line.breakTime = g_lineStates[stateIndex].breakTime; // ★★★ ピボットラインにもブレイク時刻をセット ★★★
             int size = ArraySize(allLines);
             ArrayResize(allLines, size + 1);
             allLines[size] = line;
@@ -1548,15 +1706,15 @@ void UpdateLines()
         if (!isManualSupport && !isManualResistance) continue;
         
         Line m_line;
-        string line_base_name = "Manual_" + StringSubstr(objName, StringFind(objName, "_", 0) + 1);
-        m_line.name = line_base_name;
+        m_line.name = objName;
         m_line.price = ObjectGetDouble(0, objName, OBJPROP_PRICE, 0);
         m_line.signalColor = (color)ObjectGetInteger(0, objName, OBJPROP_COLOR);
         m_line.type = isManualSupport ? LINE_TYPE_SUPPORT : LINE_TYPE_RESISTANCE;
-        m_line.startTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME, 0); // ★手動ラインの起点時間をオブジェクトから取得
+        m_line.startTime = (datetime)ObjectGetInteger(0, objName, OBJPROP_TIME, 0);
         int stateIndex = GetLineState(m_line.name);
         m_line.isBrokeUp = g_lineStates[stateIndex].isBrokeUp;
         m_line.isBrokeDown = g_lineStates[stateIndex].isBrokeDown;
+        m_line.breakTime = g_lineStates[stateIndex].breakTime; // ★★★ 手動ラインにもブレイク時刻をセット ★★★
         int size = ArraySize(allLines);
         ArrayResize(allLines, size + 1);
         allLines[size] = m_line;
@@ -2025,24 +2183,28 @@ void DrawManualTrendLine(double price, datetime time)
     MqlTick tick;
     if(!SymbolInfoTick(_Symbol, tick)) return;
 
-    // --- ★★★ 変更点: 役割(Role)を先に決定 ★★★ ---
     bool isSupport = (price < tick.ask);
     
     color line_color = isSupport ? p_ManualSupport_Color : p_ManualResist_Color;
     string role_text = isSupport ? "Support" : "Resistance";
-    // ★★★ 変更点: 名前に役割を含める ★★★
     string name = isSupport ? "ManualSupport_" : "ManualResistance_";
-    name += TimeToString(TimeCurrent(), TIME_SECONDS);
+    name += TimeToString(TimeCurrent(), TIME_SECONDS) + "_" + IntegerToString(rand());
 
     if(ObjectCreate(0, name, OBJ_TREND, 0, time, price, time + PeriodSeconds(_Period), price))
     {
         ObjectSetInteger(0, name, OBJPROP_COLOR, line_color);
-        ObjectSetString(0, name, OBJPROP_TEXT, role_text); // テキストも設定
+        ObjectSetString(0, name, OBJPROP_TEXT, role_text);
         ObjectSetInteger(0, name, OBJPROP_STYLE, p_ManualLine_Style);
         ObjectSetInteger(0, name, OBJPROP_WIDTH, p_ManualLine_Width);
         ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
         ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, true);
-        UpdateLines(); // ラインデータを即時更新
+        UpdateLines();
+        ChartRedraw();
+    }
+    else
+    {
+        int error_code = GetLastError();
+        PrintFormat("ObjectCreate に失敗しました。オブジェクト名: %s, エラーコード: %d", name, error_code);
     }
 }
 
@@ -2951,7 +3113,7 @@ void CheckZoneMacdCross()
 }
 
 //+------------------------------------------------------------------+
-//| ★★★最終版★★★ ゾーンを長方形オブジェクトで可視化する      |
+//| ゾーンを長方形オブジェクトで可視化する (終点ロジック修正版)        |
 //+------------------------------------------------------------------+
 void ManageZoneVisuals()
 {
@@ -2969,10 +3131,25 @@ void ManageZoneVisuals()
         double lower_zone = line.price - zoneWidth;
         color zone_color = (line.type == LINE_TYPE_SUPPORT) ? C'30,70,120' : C'120,70,30';
 
-        // ★開始時間に各ラインの起点時刻(line.startTime)を使用
         if(ObjectCreate(0, name, OBJ_RECTANGLE, 0, line.startTime, upper_zone))
         {
-            ObjectSetInteger(0, name, OBJPROP_TIME, 1, TimeCurrent() + 3600 * 24 * 30);
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            // ★★★ ここからが今回の修正ポイントです ★★★
+            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+            datetime endTime;
+            if (line.breakTime > 0)
+            {
+                // ラインがブレイク済みの場合、ゾーンの終点をブレイク時刻に合わせる
+                endTime = line.breakTime;
+            }
+            else
+            {
+                // まだブレイクされていない場合、未来に向かってゾーンを描画
+                endTime = TimeCurrent() + 3600 * 24 * 30; // 約1ヶ月先
+            }
+            ObjectSetInteger(0, name, OBJPROP_TIME, 1, endTime);
+            // ★★★ 修正ここまで ★★★
+            
             ObjectSetDouble(0, name, OBJPROP_PRICE, 1, lower_zone);
             ObjectSetInteger(0, name, OBJPROP_COLOR, zone_color);
             ObjectSetInteger(0, name, OBJPROP_STYLE, STYLE_SOLID);

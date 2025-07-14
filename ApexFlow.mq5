@@ -1,11 +1,12 @@
 //+------------------------------------------------------------------+
 //|                                               Git ApexFlowEA.mq5 |
 //|                                      (ZoneEntry + ZephyrSplit)   |
-//|                                    Final Corrected Version: 4.0  |
+//|                                    Final Corrected Version: 4.9  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "4.5"
+#property version   "4.9"
+#property description "基本機能動作確認バージョン　最新ベースコード"
 
 // --- ラインカラー定数
 #define CLR_S1 2970272
@@ -778,23 +779,31 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
     // --- (3) オブジェクトのドラッグイベント ---
     if(id == CHARTEVENT_OBJECT_DRAG)
     {
-        if(sparam == "TPLine_Buy")
-        {
-            isBuyTPManuallyMoved = true;
-            // ドラッグ開始と同時に実線にして、手動操作の事実を刻印
-            ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-        }
-        if(sparam == "TPLine_Sell")
-        {
-            isSellTPManuallyMoved = true;
-            // ドラッグ開始と同時に実線にして、手動操作の事実を刻印
-            ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
-        }
+        // --- お客様の既存のロジック（手動フラグの設定）---
+        if(sparam == "TPLine_Buy")  isBuyTPManuallyMoved = true;
+        if(sparam == "TPLine_Sell") isSellTPManuallyMoved = true;
         if(sparam == "SLLine_Buy")  isBuySLManuallyMoved = true;
         if(sparam == "SLLine_Sell") isSellSLManuallyMoved = true;
-        return;
-    }
+        
+        // --- 私が提案した追加ロジック（分割ラインの即時更新）---
+        if (StringFind(sparam, "TPLine_") == 0) // ドラッグされているのがTPラインか判定
+        {
+            double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0); // 最新の価格を取得
 
+            if (sparam == "TPLine_Buy" && buyGroup.isActive)
+            {
+                buyGroup.stampedFinalTP = newPrice;      // グループの目標価格を更新
+                UpdateGroupSplitLines(buyGroup); // 分割ラインを再描画
+            }
+            else if (sparam == "TPLine_Sell" && sellGroup.isActive)
+            {
+                sellGroup.stampedFinalTP = newPrice;      // グループの目標価格を更新
+                UpdateGroupSplitLines(sellGroup); // 分割ラインを再描画
+            }
+            ChartRedraw(); // チャートを再描画して即時反映
+        }
+        return; // 最後にreturn
+    }
     // --- (4) オブジェクトの編集終了イベント ---
     if(id == CHARTEVENT_OBJECT_ENDEDIT)
     {

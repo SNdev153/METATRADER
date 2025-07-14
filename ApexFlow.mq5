@@ -637,14 +637,10 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (状態永続化のバグを修正した最終完成版)      |
+//| エキスパート初期化関数 (最終修正版)                             |
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    // ArrayResize(g_lineStates, 0); // ★★★ この行を削除、またはコメントアウトします ★★★
-                                     // これが全ての記憶を消去していた元凶です。
-                                     // グローバル変数はEAがチャート上にある限り維持されるため、初期化は不要です。
-
     g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
     g_lastBarTime = 0;
     lastTradeTime = 0;
@@ -692,96 +688,66 @@ int OnInit()
     
     UpdateLines();
     
-    Print("ApexFlowEA v4.0 初期化完了");
+    Print("ApexFlowEA v4.0 初期化完了 (最終修正版)");
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| チャートイベント処理関数 (全てのボタン処理を網羅した修正版)       |
-//+------------------------------------------------------------------+
-//+------------------------------------------------------------------+
-//| チャートイベント処理関数 (座標変換ロジックを追加した最終版)       |
+//| チャートイベント処理関数 (全てのロジックを含む最終修正版)          |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
     // --- (1) オブジェクトのクリックイベント ---
     if(id == CHARTEVENT_OBJECT_CLICK)
     {
-        // --- 手動ライン描画ボタン ---
         if(sparam == g_buttonName)
         {
             g_isDrawingMode = !g_isDrawingMode;
-            if(g_isDrawingMode)
-            {
-                g_ignoreNextChartClick = true;
-            }
+            if(g_isDrawingMode) { g_ignoreNextChartClick = true; }
             UpdateButtonState();
             return;
         }
-
-        // --- シグナル消去ボタン ---
-        if(sparam == g_clearButtonName)
-        {
-            ClearSignalObjects();
-            return;
-        }
-        
-        // --- 手動ライン消去ボタン ---
-        if(sparam == g_clearLinesButtonName)
-        {
-            ClearManualLines();
-            return;
-        }
-
-        // --- 各種決済ボタン ---
+        if(sparam == g_clearButtonName) { ClearSignalObjects(); return; }
+        if(sparam == g_clearLinesButtonName) { ClearManualLines(); return; }
         if(sparam == BUTTON_BUY_CLOSE_ALL)  { CloseAllPositionsInGroup(buyGroup); return; }
         if(sparam == BUTTON_SELL_CLOSE_ALL) { CloseAllPositionsInGroup(sellGroup); return; }
-        if(sparam == BUTTON_ALL_CLOSE)
-        {
-            CloseAllPositionsInGroup(buyGroup);
-            CloseAllPositionsInGroup(sellGroup);
-            return;
-        }
-
-        // --- TPリセットボタン ---
+        if(sparam == BUTTON_ALL_CLOSE) { CloseAllPositionsInGroup(buyGroup); CloseAllPositionsInGroup(sellGroup); return; }
+        
         if(sparam == BUTTON_RESET_BUY_TP)
         {
             isBuyTPManuallyMoved = false;
-            UpdateZones();
-            if(buyGroup.isActive) { ManagePositionGroups(); }
-            ChartRedraw();
+            // リセット時に線のスタイルを点線に戻す
+            if(ObjectFind(0, "TPLine_Buy") >= 0) ObjectSetInteger(0, "TPLine_Buy", OBJPROP_STYLE, STYLE_DOT);
+            UpdateAllVisuals();
             return;
         }
         if(sparam == BUTTON_RESET_SELL_TP)
         {
             isSellTPManuallyMoved = false;
-            UpdateZones();
-            if(sellGroup.isActive) { ManagePositionGroups(); }
-            ChartRedraw();
+            // リセット時に線のスタイルを点線に戻す
+            if(ObjectFind(0, "TPLine_Sell") >= 0) ObjectSetInteger(0, "TPLine_Sell", OBJPROP_STYLE, STYLE_DOT);
+            UpdateAllVisuals();
             return;
         }
-        
-        // --- SLリセットボタン ---
-        if(sparam == BUTTON_RESET_BUY_SL) 
-        { 
-            isBuySLManuallyMoved = false; 
-            g_slLinePrice_Buy = 0; 
-            ManageSlLines(); 
-            if(buyGroup.isActive){ UpdateGroupSL(buyGroup); UpdateGroupSplitLines(buyGroup); } 
-            ChartRedraw(); 
-            return; 
+ 
+        if(sparam == BUTTON_RESET_BUY_SL)  
+        {  
+            isBuySLManuallyMoved = false;  
+            g_slLinePrice_Buy = 0;  
+            ManageSlLines();  
+            if(buyGroup.isActive){ UpdateGroupSL(buyGroup); UpdateGroupSplitLines(buyGroup); }  
+            ChartRedraw();  
+            return;  
         }
-        if(sparam == BUTTON_RESET_SELL_SL) 
-        { 
-            isSellSLManuallyMoved = false; 
-            g_slLinePrice_Sell = 0; 
-            ManageSlLines(); 
-            if(sellGroup.isActive){ UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); } 
-            ChartRedraw(); 
-            return; 
+        if(sparam == BUTTON_RESET_SELL_SL)  
+        {  
+            isSellSLManuallyMoved = false;  
+            g_slLinePrice_Sell = 0;  
+            ManageSlLines();  
+            if(sellGroup.isActive){ UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); }  
+            ChartRedraw();  
+            return;  
         }
-        
-        // --- ゾーン表示切替ボタン ---
         if(sparam == BUTTON_TOGGLE_ZONES)
         {
             g_isZoneVisualizationEnabled = !g_isZoneVisualizationEnabled;
@@ -795,58 +761,57 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
     // --- (2) チャート自体のクリックイベント ---
     if(id == CHARTEVENT_CLICK)
     {
-        if(g_ignoreNextChartClick)
-        {
-            g_ignoreNextChartClick = false;
-            return;
-        }
-        
+        if(g_ignoreNextChartClick) { g_ignoreNextChartClick = false; return; }
         if(g_isDrawingMode)
         {
-            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-            // ★★★ ここが今回の最重要修正ポイントです ★★★
-            // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-            datetime clicked_time;
-            double   clicked_price;
-            int      subwindow;
-
-            // マウスクリックのピクセル座標(lparam, dparam)を、チャートの「時間と価格」に変換する
+            datetime clicked_time; double clicked_price; int subwindow;
             if(ChartXYToTimePrice(0, (int)lparam, (int)dparam, subwindow, clicked_time, clicked_price))
             {
-                // 変換に成功した場合のみ描画を実行
                 DrawManualTrendLine(clicked_price, clicked_time);
             }
-            else
-            {
-                Print("座標から時間/価格への変換に失敗しました。ラインは描画されません。");
-            }
-            
-            g_isDrawingMode = false; // 描画モードをOFFにする
-            UpdateButtonState();     // ボタンの状態を元に戻す
+            g_isDrawingMode = false;
+            UpdateButtonState();
         }
         return;
     }
     
-    // --- (3) オブジェクトのドラッグイベント (手動TP/SLの移動検知) ---
+    // --- (3) オブジェクトのドラッグイベント ---
     if(id == CHARTEVENT_OBJECT_DRAG)
     {
-        if(sparam == "TPLine_Buy")  isBuyTPManuallyMoved = true;
-        if(sparam == "TPLine_Sell") isSellTPManuallyMoved = true;
+        if(sparam == "TPLine_Buy")
+        {
+            isBuyTPManuallyMoved = true;
+            // ドラッグ開始と同時に実線にして、手動操作の事実を刻印
+            ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
+        }
+        if(sparam == "TPLine_Sell")
+        {
+            isSellTPManuallyMoved = true;
+            // ドラッグ開始と同時に実線にして、手動操作の事実を刻印
+            ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
+        }
         if(sparam == "SLLine_Buy")  isBuySLManuallyMoved = true;
         if(sparam == "SLLine_Sell") isSellSLManuallyMoved = true;
         return;
     }
 
-    // --- (4) オブジェクトの編集終了イベント (手動TP/SLの移動確定) ---
+    // --- (4) オブジェクトの編集終了イベント ---
     if(id == CHARTEVENT_OBJECT_ENDEDIT)
     {
         if(StringFind(sparam, "TPLine_") == 0)
         {
-             double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
-             if(sparam == "TPLine_Buy")  { zonalFinalTPLine_Buy  = newPrice; if(buyGroup.isActive)  { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); } }
-             if(sparam == "TPLine_Sell") { zonalFinalTPLine_Sell = newPrice; if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup);} }
-             UpdateZones();
-             ChartRedraw();
+            double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
+            if(sparam == "TPLine_Buy")
+            {
+                zonalFinalTPLine_Buy = newPrice;
+                if(buyGroup.isActive) { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); }
+            }
+            else if(sparam == "TPLine_Sell")
+            {
+                zonalFinalTPLine_Sell = newPrice;
+                if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup); }
+            }
+            ChartRedraw();
         }
         if(StringFind(sparam, "SLLine_") == 0)
         {
@@ -1095,52 +1060,147 @@ void ManagePositionGroups()
 }
 
 //+------------------------------------------------------------------+
-//| 独立したTP時間足で計算するUpdateZones (最終クリーン版)           |
+//| ゾーンを更新する (オブジェクトスタイルで状態管理する最終版)        |
 //+------------------------------------------------------------------+
 void UpdateZones()
 {
-    double new_buy_tp = 0;
-    double new_sell_tp = 0;
+    // --- BUY TP LOGIC ---
+    string buy_tp_line_name = "TPLine_Buy";
+    bool is_buy_line_manually_moved = false;
 
-    switch(InpTPLineMode)
+    // Step 1: オブジェクトの「線のスタイル」を直接確認し、手動かどうかを判断
+    if(ObjectFind(0, buy_tp_line_name) >= 0)
     {
-        case MODE_ZIGZAG:
+        if(ObjectGetInteger(0, buy_tp_line_name, OBJPROP_STYLE) == STYLE_SOLID)
         {
-            double zigzag[]; ArraySetAsSeries(zigzag, true);
-            if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0){ double levelHigh = 0, levelLow = DBL_MAX; for(int i = 0; i < 100; i++){ if(zigzag[i] > 0){ if(zigzag[i] > levelHigh) levelHigh = zigzag[i]; if(zigzag[i] < levelLow) levelLow = zigzag[i]; } } new_buy_tp = levelHigh; new_sell_tp = (levelLow < DBL_MAX) ? levelLow : 0; }
-            break;
-        }
-        case MODE_PIVOT:
-        {
-            MqlRates rates[];
-            if(CopyRates(_Symbol, InpTP_Timeframe, 1, 1, rates) > 0)
-            {
-                double h_tp = rates[0].high, l_tp = rates[0].low, c_tp = rates[0].close;
-                double p_tp = (h_tp + l_tp + c_tp) / 3.0;
-                double r1_tp = 2.0 * p_tp - l_tp, s1_tp = 2.0 * p_tp - h_tp, r2_tp = p_tp + (h_tp - l_tp), s2_tp = p_tp - (h_tp - l_tp), r3_tp = h_tp + 2.0 * (p_tp - l_tp), s3_tp = l_tp - 2.0 * (h_tp - p_tp);
-
-                double current_price = (SymbolInfoDouble(_Symbol, SYMBOL_ASK) + SymbolInfoDouble(_Symbol, SYMBOL_BID)) / 2.0;
-                double buy_ref_price = buyGroup.isActive ? buyGroup.averageEntryPrice : current_price;
-                double sell_ref_price = sellGroup.isActive ? sellGroup.averageEntryPrice : current_price;
-
-                double resistances[] = {r1_tp, r2_tp, r3_tp};
-                double closest_r = 0;
-                for(int i=0; i<ArraySize(resistances); i++){ if(resistances[i] > buy_ref_price){ if(closest_r == 0 || resistances[i] < closest_r){ closest_r = resistances[i]; }}}
-                new_buy_tp = closest_r;
-
-                double supports[] = {s1_tp, s2_tp, s3_tp};
-                double closest_s = 0;
-                for(int i=0; i<ArraySize(supports); i++){ if(supports[i] < sell_ref_price && supports[i] > 0){ if(closest_s == 0 || supports[i] > closest_s){ closest_s = supports[i]; }}}
-                new_sell_tp = closest_s;
-            }
-            break;
+            is_buy_line_manually_moved = true; // 実線なら手動と判断
         }
     }
-    
-    if (!isBuyTPManuallyMoved){ if (new_buy_tp > 0){ double final_buy_tp = new_buy_tp; if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High){ double originalDiff = final_buy_tp - buyGroup.averageEntryPrice; if (originalDiff > 0) final_buy_tp = buyGroup.averageEntryPrice + (originalDiff * InpHighSchoreTpRratio); } zonalFinalTPLine_Buy = final_buy_tp; } }
-    if (zonalFinalTPLine_Buy > 0){ string name = "TPLine_Buy"; if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0); ObjectMove(0, name, 0, 0, zonalFinalTPLine_Buy); ObjectSetInteger(0, name, OBJPROP_COLOR, clrGold); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2); ObjectSetInteger(0, name, OBJPROP_STYLE, isBuyTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true); ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); }
-    if (!isSellTPManuallyMoved){ if (new_sell_tp > 0){ double final_sell_tp = new_sell_tp; if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High){ double originalDiff = sellGroup.averageEntryPrice - final_sell_tp; if (originalDiff > 0) final_sell_tp = sellGroup.averageEntryPrice - (originalDiff * InpHighSchoreTpRratio); } zonalFinalTPLine_Sell = final_sell_tp; } }
-    if (zonalFinalTPLine_Sell > 0){ string name = "TPLine_Sell"; if(ObjectFind(0, name) < 0) ObjectCreate(0, name, OBJ_HLINE, 0, 0, 0); ObjectMove(0, name, 0, 0, zonalFinalTPLine_Sell); ObjectSetInteger(0, name, OBJPROP_COLOR, clrMediumPurple); ObjectSetInteger(0, name, OBJPROP_WIDTH, 2); ObjectSetInteger(0, name, OBJPROP_STYLE, isSellTPManuallyMoved ? STYLE_SOLID : STYLE_DOT); ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true); ObjectSetInteger(0, name, OBJPROP_ZORDER, 10); }
+
+    // Step 2: 手動（実線）でない場合「のみ」自動計算を実行
+    if (!is_buy_line_manually_moved)
+    {
+        double new_buy_tp = 0;
+        switch(InpTPLineMode)
+        {
+            case MODE_ZIGZAG:
+            {
+                double zigzag[]; ArraySetAsSeries(zigzag, true);
+                if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0){ double levelHigh = 0; for(int i = 0; i < 100; i++){ if(zigzag[i] > 0){ if(zigzag[i] > levelHigh) levelHigh = zigzag[i]; } } new_buy_tp = levelHigh; }
+                break;
+            }
+            case MODE_PIVOT:
+            {
+                MqlRates rates[];
+                if(CopyRates(_Symbol, InpTP_Timeframe, 1, 1, rates) > 0)
+                {
+                    double h_tp = rates[0].high, l_tp = rates[0].low, c_tp = rates[0].close;
+                    double p_tp = (h_tp + l_tp + c_tp) / 3.0;
+                    double r1_tp = 2.0 * p_tp - l_tp, r2_tp = p_tp + (h_tp - l_tp), r3_tp = h_tp + 2.0 * (p_tp - l_tp);
+                    double buy_ref_price = buyGroup.isActive ? buyGroup.averageEntryPrice : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+                    double resistances[] = {r1_tp, r2_tp, r3_tp};
+                    double closest_r = 0;
+                    for(int i=0; i<ArraySize(resistances); i++){ if(resistances[i] > buy_ref_price){ if(closest_r == 0 || resistances[i] < closest_r){ closest_r = resistances[i]; }}}
+                    new_buy_tp = closest_r;
+                }
+                break;
+            }
+        }
+        if (new_buy_tp > 0)
+        {
+            double final_buy_tp = new_buy_tp;
+            if (buyGroup.isActive && buyGroup.highestScore >= InpScore_High)
+            { 
+                double originalDiff = final_buy_tp - buyGroup.averageEntryPrice; 
+                if (originalDiff > 0) final_buy_tp = buyGroup.averageEntryPrice + (originalDiff * InpHighSchoreTpRratio); 
+            }
+            zonalFinalTPLine_Buy = final_buy_tp;
+        }
+    }
+    else
+    {
+        // 手動（実線）の場合、オブジェクトの現在価格を正としてグローバル変数に反映
+        zonalFinalTPLine_Buy = ObjectGetDouble(0, buy_tp_line_name, OBJPROP_PRICE, 0);
+    }
+
+    // Step 3: 最終的な価格でラインを描画
+    if (zonalFinalTPLine_Buy > 0)
+    {
+        if(ObjectFind(0, buy_tp_line_name) < 0) ObjectCreate(0, buy_tp_line_name, OBJ_HLINE, 0, 0, 0);
+        ObjectMove(0, buy_tp_line_name, 0, 0, zonalFinalTPLine_Buy);
+        ObjectSetInteger(0, buy_tp_line_name, OBJPROP_COLOR, clrGold);
+        ObjectSetInteger(0, buy_tp_line_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, buy_tp_line_name, OBJPROP_STYLE, is_buy_line_manually_moved ? STYLE_SOLID : STYLE_DOT);
+        ObjectSetInteger(0, buy_tp_line_name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, buy_tp_line_name, OBJPROP_ZORDER, 10);
+    }
+
+    // --- SELL TP LOGIC (同様に修正) ---
+    string sell_tp_line_name = "TPLine_Sell";
+    bool is_sell_line_manually_moved = false;
+
+    if(ObjectFind(0, sell_tp_line_name) >= 0)
+    {
+        if(ObjectGetInteger(0, sell_tp_line_name, OBJPROP_STYLE) == STYLE_SOLID)
+        {
+            is_sell_line_manually_moved = true;
+        }
+    }
+
+    if (!is_sell_line_manually_moved)
+    {
+        double new_sell_tp = 0;
+        switch(InpTPLineMode)
+        {
+            case MODE_ZIGZAG:
+            {
+                double zigzag[]; ArraySetAsSeries(zigzag, true);
+                if(CopyBuffer(zigzagHandle, 0, 0, 100, zigzag) > 0){ double levelLow = DBL_MAX; for(int i = 0; i < 100; i++){ if(zigzag[i] > 0){ if(zigzag[i] < levelLow) levelLow = zigzag[i]; } } new_sell_tp = (levelLow < DBL_MAX) ? levelLow : 0; }
+                break;
+            }
+            case MODE_PIVOT:
+            {
+                MqlRates rates[];
+                if(CopyRates(_Symbol, InpTP_Timeframe, 1, 1, rates) > 0)
+                {
+                    double h_tp = rates[0].high, l_tp = rates[0].low, c_tp = rates[0].close;
+                    double p_tp = (h_tp + l_tp + c_tp) / 3.0;
+                    double s1_tp = 2.0 * p_tp - h_tp, s2_tp = p_tp - (h_tp - l_tp), s3_tp = l_tp - 2.0 * (h_tp - p_tp);
+                    double sell_ref_price = sellGroup.isActive ? sellGroup.averageEntryPrice : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+                    double supports[] = {s1_tp, s2_tp, s3_tp};
+                    double closest_s = 0;
+                    for(int i=0; i<ArraySize(supports); i++){ if(supports[i] < sell_ref_price && supports[i] > 0){ if(closest_s == 0 || supports[i] > closest_s){ closest_s = supports[i]; }}}
+                    new_sell_tp = closest_s;
+                }
+                break;
+            }
+        }
+        if(new_sell_tp > 0)
+        {
+            double final_sell_tp = new_sell_tp;
+            if (sellGroup.isActive && sellGroup.highestScore >= InpScore_High) 
+            {
+                double originalDiff = sellGroup.averageEntryPrice - final_sell_tp; 
+                if (originalDiff > 0) final_sell_tp = sellGroup.averageEntryPrice - (originalDiff * InpHighSchoreTpRratio); 
+            }
+            zonalFinalTPLine_Sell = final_sell_tp;
+        }
+    }
+    else
+    {
+        zonalFinalTPLine_Sell = ObjectGetDouble(0, sell_tp_line_name, OBJPROP_PRICE, 0);
+    }
+
+    if (zonalFinalTPLine_Sell > 0)
+    {
+        if(ObjectFind(0, sell_tp_line_name) < 0) ObjectCreate(0, sell_tp_line_name, OBJ_HLINE, 0, 0, 0);
+        ObjectMove(0, sell_tp_line_name, 0, 0, zonalFinalTPLine_Sell);
+        ObjectSetInteger(0, sell_tp_line_name, OBJPROP_COLOR, clrMediumPurple);
+        ObjectSetInteger(0, sell_tp_line_name, OBJPROP_WIDTH, 2);
+        ObjectSetInteger(0, sell_tp_line_name, OBJPROP_STYLE, is_sell_line_manually_moved ? STYLE_SOLID : STYLE_DOT);
+        ObjectSetInteger(0, sell_tp_line_name, OBJPROP_SELECTABLE, true);
+        ObjectSetInteger(0, sell_tp_line_name, OBJPROP_ZORDER, 10);
+    }
 }
 
 //+------------------------------------------------------------------+

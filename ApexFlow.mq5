@@ -5,7 +5,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "4.0"
+#property version   "4.5"
 
 // --- ラインカラー定数
 #define CLR_S1 2970272

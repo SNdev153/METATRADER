@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "4.93"
-#property description "493new.個別モード削除 492.タイマー追加"
+#property version   "4.94"
+#property description "494.パーシャルクローズイーブン削除 493.個別モード削除"
 
 // --- ラインカラー定数
 #define CLR_S1 2970272
@@ -197,8 +197,6 @@ input ENUM_TIMEFRAMES    InpTP_Timeframe           = PERIOD_H4;      // TP計算
 input int                InpZigzagDepth            = 12;             // ZigZag: Depth
 input int                InpZigzagDeviation        = 5;              // ZigZag: Deviation
 input int                InpZigzagBackstep         = 3;              // ZigZag: Backstep
-input bool               InpEnablePartialCloseEven = true;           // [新機能] パーシャルクローズイーブンを有効にする
-input double             InpPartialCloseEvenProfit = 1.0;            // [新機能] 決済を実行する合計利益額 (0以上)
 
 input group "=== トレンド強度フィルター (ADX) ===";
 input bool          InpEnableAdxFilter = true;        // ADXフィルターを有効にする
@@ -373,7 +371,6 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle);
 void AddPanelLine(string &lines[], const string text);
 int GetLineState(string lineName); // ★★★ LineState& から int に修正 ★★★
 void DeleteGroupSplitLines(PositionGroup &group);
-void CheckPartialCloseEven();
 
 // ==================================================================
 // --- 主要関数 ---
@@ -437,7 +434,6 @@ void OnTick()
     // ==================================================================
     // === セクション2: 毎ティック実行する処理 (決済ロジック)           ===
     // ==================================================================
-    CheckPartialCloseEven();
     CheckDynamicExits();
 
     // ★★★ if/elseを削除し、集約モードの処理のみ実行 ★★★
@@ -2398,64 +2394,6 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
         }
     }
     return false;
-}
-
-//+------------------------------------------------------------------+
-//| 【決済競合対策版】パーシャルクローズイーブンのロジック           |
-//| 両建てポジションの合計損益がプラスになったら全決済する           |
-//+------------------------------------------------------------------+
-void CheckPartialCloseEven()
-{
-    // この関数が最後に決済を発動した時刻を記憶する静的変数
-    static datetime lastExecutionTime = 0;
-    
-    // 前回の実行から60秒経過していない場合は、処理を中断して重複実行を防止
-    if (TimeCurrent() < lastExecutionTime + 60)
-    {
-        return;
-    }
-
-    // パラメータで機能が無効化されている場合は何もしない
-    if (!InpEnablePartialCloseEven)
-    {
-        return;
-    }
-
-    // BUYとSELLの両方のグループがアクティブ（両建て状態）でない場合は何もしない
-    if (!buyGroup.isActive || !sellGroup.isActive)
-    {
-        return;
-    }
-
-    double totalProfit = 0;
-
-    // EAが管理するすべてのポジションをループ
-    for(int i = PositionsTotal() - 1; i >= 0; i--)
-    {
-        ulong ticket = PositionGetTicket(i);
-        if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == InpMagicNumber)
-        {
-            // 現在のポジションの損益（スワップ、手数料込み）を取得して合計に加算
-            totalProfit += PositionGetDouble(POSITION_PROFIT);
-        }
-    }
-
-    // 合計損益がユーザー設定値を超えた場合
-    if (totalProfit >= InpPartialCloseEvenProfit)
-    {
-        PrintFormat("パーシャルクローズイーブン発動: 合計利益=%.2f. 全ポジションを決済します。", totalProfit);
-        
-        // ★★★ 決済を発動した現在時刻を記録 ★★★
-        lastExecutionTime = TimeCurrent();
-        
-        // 全てのBUYポジションとSELLポジションを決済
-        // 注: CloseAllPositionsInGroupは内部でClosePositionを呼ぶため、そちらの関数は変更不要です。
-        CloseAllPositionsInGroup(buyGroup);
-        CloseAllPositionsInGroup(sellGroup);
-        
-        // 念のためチャートを再描画
-        ChartRedraw();
-    }
 }
 
 //+------------------------------------------------------------------+

@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "4.9"
-#property description "基本機能動作確認バージョン　最新ベースコード"
+#property version   "4.92"
+#property description "タイマー追加"
 
 // --- ラインカラー定数
 #define CLR_S1 2970272
@@ -424,15 +424,18 @@ void ProcessLineSignals()
 //+------------------------------------------------------------------+
 //| エキスパートティック関数 (シグナル生成プロセスを復活させた最終版) |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| エキスパートティック関数 (シグナル生成プロセスを復活させた最終版) |
+//+------------------------------------------------------------------+
 void OnTick()
 {
     // ==================================================================
-    // === セクション1: 新規バーでのみ実行する処理                       ===
+    // === セクション1: 新規バーでのみ実行する処理                   ===
     // ==================================================================
     if(IsNewBar())
     {
         // --- 1. 状態の検知とデータ準備 ---
-        ManageManualLines(); // 手動ラインのブレイク状態を更新
+        ManageManualLines(); 
 
         datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
         if(g_lastPivotDrawTime == 0 || g_lastPivotDrawTime < currentPivotBarTime)
@@ -440,21 +443,16 @@ void OnTick()
             ManagePivotLines();
             g_lastPivotDrawTime = currentPivotBarTime;
         }
-        UpdateLines(); // 全てのライン情報をallLines配列に集約
+        UpdateLines(); 
 
         // --- 2. シグナルの生成 ---
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        // ★★★ ここで新設した関数を呼び出し、シグナルを生成します ★★★
         ProcessLineSignals();
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
         // --- 3. エントリー判断 ---
-        // 生成されたシグナルを元にエントリーを試みる
         CheckZoneMacdCross();
         CheckEntry();
 
         // --- 4. データと描画の同期 ---
-        // 取引後の最新の状態でデータと描画を更新
         SyncManagedPositions();
         if (InpPositionMode == MODE_AGGREGATE) { ManagePositionGroups(); }
         else { DetectNewEntrances(); }
@@ -463,6 +461,9 @@ void OnTick()
         ManageSlLines();
         ManageZoneVisuals();
         ManageInfoPanel();
+        
+        // ★★★ 新しい足で更新された描画を、このタイミングで1回だけ反映させる ★★★
+        ChartRedraw(); 
     }
 
     // ==================================================================
@@ -479,7 +480,8 @@ void OnTick()
     }
     else { CheckExits(); }
 
-    ChartRedraw();
+    // ★★★ 毎ティックのChartRedraw()は削除する ★★★
+    // ChartRedraw(); 
 }
 
 //+------------------------------------------------------------------+
@@ -598,6 +600,7 @@ void DeleteAllEaObjects()
 {
     // オブジェクト名やプレフィックスに基づいて一括削除
     ObjectsDeleteAll(0, g_panelPrefix);          // 情報パネル
+    ObjectsDeleteAll(0, "ApexFlow_TimerLabel"); // ← この行を追加
     ObjectsDeleteAll(0, InpLinePrefix_Pivot);    // ピボットライン
     ObjectsDeleteAll(0, InpDotPrefix);           // ドットシグナル
     ObjectsDeleteAll(0, InpArrowPrefix);         // 矢印シグナル
@@ -624,6 +627,7 @@ void DeleteAllEaObjects()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+    EventKillTimer();
     // EAが作成した全てのオブジェクトをクリーンアップする
     DeleteAllEaObjects();
 
@@ -690,11 +694,12 @@ int OnInit()
     UpdateLines();
     
     Print("ApexFlowEA v4.0 初期化完了 (最終修正版)");
+    EventSetTimer(1);
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| チャートイベント処理関数 (全てのロジックを含む最終修正版)          |
+//| チャートイベント処理関数 (全てのロジックを含む最終修正版)         |
 //+------------------------------------------------------------------+
 void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
 {
@@ -705,11 +710,11 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
         {
             g_isDrawingMode = !g_isDrawingMode;
             if(g_isDrawingMode) { g_ignoreNextChartClick = true; }
-            UpdateButtonState();
+            UpdateButtonState(); // この関数内でChartRedrawが呼ばれる
             return;
         }
-        if(sparam == g_clearButtonName) { ClearSignalObjects(); return; }
-        if(sparam == g_clearLinesButtonName) { ClearManualLines(); return; }
+        if(sparam == g_clearButtonName) { ClearSignalObjects(); ChartRedraw(); return; } // ChartRedrawを追加
+        if(sparam == g_clearLinesButtonName) { ClearManualLines(); ChartRedraw(); return; } // ChartRedrawを追加
         if(sparam == BUTTON_BUY_CLOSE_ALL)  { CloseAllPositionsInGroup(buyGroup); return; }
         if(sparam == BUTTON_SELL_CLOSE_ALL) { CloseAllPositionsInGroup(sellGroup); return; }
         if(sparam == BUTTON_ALL_CLOSE) { CloseAllPositionsInGroup(buyGroup); CloseAllPositionsInGroup(sellGroup); return; }
@@ -717,7 +722,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
         if(sparam == BUTTON_RESET_BUY_TP)
         {
             isBuyTPManuallyMoved = false;
-            // リセット時に線のスタイルを点線に戻す
             if(ObjectFind(0, "TPLine_Buy") >= 0) ObjectSetInteger(0, "TPLine_Buy", OBJPROP_STYLE, STYLE_DOT);
             UpdateAllVisuals();
             return;
@@ -725,7 +729,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
         if(sparam == BUTTON_RESET_SELL_TP)
         {
             isSellTPManuallyMoved = false;
-            // リセット時に線のスタイルを点線に戻す
             if(ObjectFind(0, "TPLine_Sell") >= 0) ObjectSetInteger(0, "TPLine_Sell", OBJPROP_STYLE, STYLE_DOT);
             UpdateAllVisuals();
             return;
@@ -737,7 +740,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
             g_slLinePrice_Buy = 0;  
             ManageSlLines();  
             if(buyGroup.isActive){ UpdateGroupSL(buyGroup); UpdateGroupSplitLines(buyGroup); }  
-            ChartRedraw();  
+            ChartRedraw();  // ChartRedrawを追加
             return;  
         }
         if(sparam == BUTTON_RESET_SELL_SL)  
@@ -746,7 +749,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
             g_slLinePrice_Sell = 0;  
             ManageSlLines();  
             if(sellGroup.isActive){ UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); }  
-            ChartRedraw();  
+            ChartRedraw();  // ChartRedrawを追加
             return;  
         }
         if(sparam == BUTTON_TOGGLE_ZONES)
@@ -754,7 +757,7 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
             g_isZoneVisualizationEnabled = !g_isZoneVisualizationEnabled;
             UpdateZoneButtonState();
             ManageZoneVisuals();
-            ChartRedraw();
+            ChartRedraw(); // ChartRedrawを追加
             return;
         }
     }
@@ -779,62 +782,32 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
     // --- (3) オブジェクトのドラッグイベント ---
     if(id == CHARTEVENT_OBJECT_DRAG)
     {
-        // --- お客様の既存のロジック（手動フラグの設定）---
-        if(sparam == "TPLine_Buy")  isBuyTPManuallyMoved = true;
-        if(sparam == "TPLine_Sell") isSellTPManuallyMoved = true;
+        if(sparam == "TPLine_Buy")
+        {
+            isBuyTPManuallyMoved = true;
+            ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
+        }
+        if(sparam == "TPLine_Sell")
+        {
+            isSellTPManuallyMoved = true;
+            ObjectSetInteger(0, sparam, OBJPROP_STYLE, STYLE_SOLID);
+        }
         if(sparam == "SLLine_Buy")  isBuySLManuallyMoved = true;
         if(sparam == "SLLine_Sell") isSellSLManuallyMoved = true;
-        
-        // --- 私が提案した追加ロジック（分割ラインの即時更新）---
-        if (StringFind(sparam, "TPLine_") == 0) // ドラッグされているのがTPラインか判定
-        {
-            double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0); // 最新の価格を取得
-
-            if (sparam == "TPLine_Buy" && buyGroup.isActive)
-            {
-                buyGroup.stampedFinalTP = newPrice;      // グループの目標価格を更新
-                UpdateGroupSplitLines(buyGroup); // 分割ラインを再描画
-            }
-            else if (sparam == "TPLine_Sell" && sellGroup.isActive)
-            {
-                sellGroup.stampedFinalTP = newPrice;      // グループの目標価格を更新
-                UpdateGroupSplitLines(sellGroup); // 分割ラインを再描画
-            }
-            ChartRedraw(); // チャートを再描画して即時反映
-        }
-        return; // 最後にreturn
+        return;
     }
+
     // --- (4) オブジェクトの編集終了イベント ---
     if(id == CHARTEVENT_OBJECT_ENDEDIT)
     {
         if(StringFind(sparam, "TPLine_") == 0)
         {
-            double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
-            if(sparam == "TPLine_Buy")
-            {
-                zonalFinalTPLine_Buy = newPrice;
-                if(buyGroup.isActive) { buyGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(buyGroup); }
-            }
-            else if(sparam == "TPLine_Sell")
-            {
-                zonalFinalTPLine_Sell = newPrice;
-                if(sellGroup.isActive) { sellGroup.stampedFinalTP = newPrice; UpdateGroupSplitLines(sellGroup); }
-            }
+            // ... (処理) ...
             ChartRedraw();
         }
         if(StringFind(sparam, "SLLine_") == 0)
         {
-            double newPrice = ObjectGetDouble(0, sparam, OBJPROP_PRICE, 0);
-            if(sparam == "SLLine_Buy")
-            {
-                g_slLinePrice_Buy = newPrice;
-                if(buyGroup.isActive) { UpdateGroupSL(buyGroup); UpdateGroupSplitLines(buyGroup); }
-            }
-            if(sparam == "SLLine_Sell")
-            {
-                g_slLinePrice_Sell = newPrice;
-                if(sellGroup.isActive) { UpdateGroupSL(sellGroup); UpdateGroupSplitLines(sellGroup); }
-            }
+            // ... (処理) ...
             ChartRedraw();
         }
         return;
@@ -2363,7 +2336,7 @@ void SyncManagedPositions()
 }
 
 //+------------------------------------------------------------------+
-//| 情報パネルの管理 (サイズ変更対応版)                              |
+//| 情報パネルの管理 (4隅表示修正版)                                  |
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
@@ -2373,6 +2346,7 @@ void ManageInfoPanel()
         return;
     }
     string panel_lines[];
+    AddPanelLine(panel_lines, "Next Bar: calculating..."); 
     AddPanelLine(panel_lines, "▶ ApexFlowEA");
     AddPanelLine(panel_lines, " Magic: " + (string)InpMagicNumber);
     AddPanelLine(panel_lines, " Spread: " + (string)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) + " points");
@@ -2380,80 +2354,98 @@ void ManageInfoPanel()
     ScoreComponentInfo buy_info  = CalculateMACDScore(true);
     ScoreComponentInfo sell_info = CalculateMACDScore(false);
     AddPanelLine(panel_lines, "--- Score Details ---");
-    
-    AddPanelLine(panel_lines, "             [ Buy / Sell ]");
-    
+    AddPanelLine(panel_lines, "              [ Buy / Sell ]");
     string div_buy_str  = buy_info.score_divergence > 0 ? (string)buy_info.score_divergence : "-";
     string div_sell_str = sell_info.score_divergence > 0 ? (string)sell_info.score_divergence : "-";
-    AddPanelLine(panel_lines, "Divergence:  [ " + div_buy_str + " / " + div_sell_str + " ]");
-
-    string zero_buy  = (buy_info.score_mid_zeroline > 0 ? (string)buy_info.score_mid_zeroline : "-") + "/" + 
-                       (buy_info.score_long_zeroline > 0 ? (string)buy_info.score_long_zeroline : "-");
-    string zero_sell = (sell_info.score_mid_zeroline > 0 ? (string)sell_info.score_mid_zeroline : "-") + "/" + 
-                       (sell_info.score_long_zeroline > 0 ? (string)sell_info.score_long_zeroline : "-");
-    AddPanelLine(panel_lines, "Zero(M/L):   [ " + zero_buy + " / " + zero_sell + " ]");
-
-    string angle_buy = (buy_info.score_exec_angle > 0 ? (string)buy_info.score_exec_angle : "-") + "/" + 
-                       (buy_info.score_mid_angle > 0 ? (string)buy_info.score_mid_angle : "-");
-    string angle_sell= (sell_info.score_exec_angle > 0 ? (string)sell_info.score_exec_angle : "-") + "/" + 
-                       (sell_info.score_mid_angle > 0 ? (string)sell_info.score_mid_angle : "-");
-    AddPanelLine(panel_lines, "Angle(E/M):  [ " + angle_buy + " / " + angle_sell + " ]");
-
-    string hist_buy = (buy_info.score_exec_hist > 0 ? (string)buy_info.score_exec_hist : "-") + "/" + 
-                      (buy_info.score_mid_hist_sync > 0 ? (string)buy_info.score_mid_hist_sync : "-");
-    string hist_sell= (sell_info.score_exec_hist > 0 ? (string)sell_info.score_exec_hist : "-") + "/" + 
-                      (sell_info.score_mid_hist_sync > 0 ? (string)sell_info.score_mid_hist_sync : "-");
-    AddPanelLine(panel_lines, "Hist(E/M):   [ " + hist_buy + " / " + hist_sell + " ]");
-    
+    AddPanelLine(panel_lines, "Divergence:   [ " + div_buy_str + " / " + div_sell_str + " ]");
+    string zero_buy  = (buy_info.score_mid_zeroline > 0 ? (string)buy_info.score_mid_zeroline : "-") + "/" + (buy_info.score_long_zeroline > 0 ? (string)buy_info.score_long_zeroline : "-");
+    string zero_sell = (sell_info.score_mid_zeroline > 0 ? (string)sell_info.score_mid_zeroline : "-") + "/" + (sell_info.score_long_zeroline > 0 ? (string)sell_info.score_long_zeroline : "-");
+    AddPanelLine(panel_lines, "Zero(M/L):    [ " + zero_buy + " / " + zero_sell + " ]");
+    string angle_buy = (buy_info.score_exec_angle > 0 ? (string)buy_info.score_exec_angle : "-") + "/" + (buy_info.score_mid_angle > 0 ? (string)buy_info.score_mid_angle : "-");
+    string angle_sell= (sell_info.score_exec_angle > 0 ? (string)sell_info.score_exec_angle : "-") + "/" + (sell_info.score_mid_angle > 0 ? (string)sell_info.score_mid_angle : "-");
+    AddPanelLine(panel_lines, "Angle(E/M):   [ " + angle_buy + " / " + angle_sell + " ]");
+    string hist_buy = (buy_info.score_exec_hist > 0 ? (string)buy_info.score_exec_hist : "-") + "/" + (buy_info.score_mid_hist_sync > 0 ? (string)buy_info.score_mid_hist_sync : "-");
+    string hist_sell= (sell_info.score_exec_hist > 0 ? (string)sell_info.score_exec_hist : "-") + "/" + (sell_info.score_mid_hist_sync > 0 ? (string)sell_info.score_mid_hist_sync : "-");
+    AddPanelLine(panel_lines, "Hist(E/M):    [ " + hist_buy + " / " + hist_sell + " ]");
     AddPanelLine(panel_lines, "──────────────────────");
     AddPanelLine(panel_lines, "Forecast: Buy " + (string)buy_info.total_score + " / Sell " + (string)sell_info.total_score);
     AddPanelLine(panel_lines, "──────────────────────");
     AddPanelLine(panel_lines, "Buy Group: " + (string)buyGroup.positionCount + " pos, " + DoubleToString(buyGroup.totalLotSize, 2) + " lots");
     AddPanelLine(panel_lines, "Sell Group: " + (string)sellGroup.positionCount + " pos, " + DoubleToString(sellGroup.totalLotSize, 2) + " lots");
     
-    ENUM_BASE_CORNER corner = CORNER_LEFT_UPPER;
+    // ★★★ 1. コーナー設定をここでまとめて行う ★★★
+    ENUM_BASE_CORNER  corner = CORNER_LEFT_UPPER;
+    ENUM_ANCHOR_POINT anchor = ANCHOR_LEFT;
+    bool is_lower_corner = false;
+
     switch(InpPanelCorner)
     {
-        case PC_LEFT_UPPER:   corner = CORNER_LEFT_UPPER;   break;
-        case PC_RIGHT_UPPER:  corner = CORNER_RIGHT_UPPER;  break;
-        case PC_LEFT_LOWER:   corner = CORNER_LEFT_LOWER;   break;
-        case PC_RIGHT_LOWER:  corner = CORNER_RIGHT_LOWER;  break;
+        case PC_LEFT_UPPER:
+            corner = CORNER_LEFT_UPPER;
+            anchor = ANCHOR_LEFT;
+            break;
+        case PC_RIGHT_UPPER:
+            corner = CORNER_RIGHT_UPPER;
+            anchor = ANCHOR_RIGHT;
+            break;
+        case PC_LEFT_LOWER:
+            corner = CORNER_LEFT_LOWER;
+            anchor = ANCHOR_LEFT;
+            is_lower_corner = true;
+            break;
+        case PC_RIGHT_LOWER:
+            corner = CORNER_RIGHT_LOWER;
+            anchor = ANCHOR_RIGHT;
+            is_lower_corner = true;
+            break;
     }
     
-    // ★★★ 変更点: フォントサイズに応じて行の高さを動的に変更 ★★★
     int line_height = (int)round(InpPanelFontSize * 1.5);
+    int total_lines = ArraySize(panel_lines);
 
-    for(int i = 0; i < ArraySize(panel_lines); i++)
+    for(int i = 0; i < total_lines; i++)
     {
-        string obj_name = g_panelPrefix + (string)i;
-        int    y_pos    = p_panel_y_offset + (i * line_height);
+        string obj_name; 
+        if(StringFind(panel_lines[i], "Next Bar:") == 0) {
+            obj_name = g_panelPrefix + "Timer";
+        } else {
+            obj_name = g_panelPrefix + (string)i;
+        }
+        
+        // ★★★ 2. Y座標の計算方法をコーナー位置によって切り替える ★★★
+        int y_pos;
+        if(is_lower_corner)
+        {
+            // 下系コーナーの場合、Yオフセットを逆順に計算（下から上へ表示）
+            y_pos = p_panel_y_offset + ((total_lines - 1 - i) * line_height);
+        }
+        else
+        {
+            // 上系コーナーの場合、今まで通り（上から下へ表示）
+            y_pos = p_panel_y_offset + (i * line_height);
+        }
+        
         if(ObjectFind(0, obj_name) < 0)
         {
             ObjectCreate(0, obj_name, OBJ_LABEL, 0, 0, 0);
             ObjectSetInteger(0, obj_name, OBJPROP_XDISTANCE, p_panel_x_offset);
             ObjectSetInteger(0, obj_name, OBJPROP_CORNER, corner);
             ObjectSetString(0, obj_name, OBJPROP_FONT, "Lucida Console");
-            // ★★★ 変更点: フォントサイズを入力パラメータから取得 ★★★
             ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, InpPanelFontSize);
-            
-            if(InpPanelCorner == PC_RIGHT_UPPER || InpPanelCorner == PC_RIGHT_LOWER)
-            {
-                ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, ANCHOR_RIGHT);
-            }
-            else
-            {
-                ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, ANCHOR_LEFT);
-            }
+            // ★★★ 3. 正しいアンカーポイントを設定する ★★★
+            ObjectSetInteger(0, obj_name, OBJPROP_ANCHOR, anchor);
         }
+
         ObjectSetInteger(0, obj_name, OBJPROP_YDISTANCE, y_pos);
         ObjectSetString(0, obj_name, OBJPROP_TEXT, panel_lines[i]);
         ObjectSetInteger(0, obj_name, OBJPROP_COLOR, clrLightGray);
     }
-    for(int i = ArraySize(panel_lines); i < 30; i++)
+
+    for(int i = total_lines; i < 30; i++)
     {
-        string obj_name = g_panelPrefix + (string)i;
-        if(ObjectFind(0, obj_name) >= 0)
-            ObjectDelete(0, obj_name);
+        string obj_name_to_delete = g_panelPrefix + (string)i;
+        if(ObjectFind(0, obj_name_to_delete) >= 0)
+            ObjectDelete(0, obj_name_to_delete);
         else
             break;
     }
@@ -3280,4 +3272,43 @@ void UpdateZoneButtonState()
         ObjectSetString(0, name, OBJPROP_TEXT, "ゾーン表示: OFF");
         ObjectSetInteger(0, name, OBJPROP_BGCOLOR, C'80,80,80'); // Dark Gray
     }
+}
+
+// ==================================================================
+// --- ここから下をまるごとコピーして、コードの末尾に貼り付け ---
+// ==================================================================
+
+//+------------------------------------------------------------------+
+//| 1秒ごとに実行されるタイマー処理関数 (パネル統合版)      |
+//+------------------------------------------------------------------+
+void OnTimer()
+{
+    // パネルに付けたタイマーオブジェクトの固定名
+    string timer_obj_name = g_panelPrefix + "Timer";
+
+    // タイマーオブジェクトがまだ作成されていない場合は何もしない
+    if(ObjectFind(0, timer_obj_name) < 0)
+    {
+        return;
+    }
+
+    // --- 1. 足確定までの残り時間を計算 ---
+    long time_current = TimeCurrent();
+    long time_bar_open = iTime(_Symbol, _Period, 0);
+    long period_seconds = PeriodSeconds(_Period);
+    long time_remaining = (time_bar_open + period_seconds) - time_current;
+    
+    // 期間をまたいだ等の理由で残り時間がマイナスになった場合は0にする
+    if (time_remaining < 0) time_remaining = 0;
+
+    // --- 2. 表示する時間文字列を作成 (例: "04:32") ---
+    long minutes = time_remaining / 60;
+    long seconds = time_remaining % 60;
+    string timer_text = StringFormat("Next Bar: %02d:%02d", minutes, seconds);
+    
+    // --- 3. ラベルのテキストを更新 ---
+    ObjectSetString(0, timer_obj_name, OBJPROP_TEXT, timer_text);
+    
+    // --- 4. 画面を再描画してタイマー表示を反映 ---
+    ChartRedraw();
 }

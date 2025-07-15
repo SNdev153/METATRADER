@@ -5,9 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "4.94"
-#property description "494.パーシャルクローズイーブン削除 493.個別モード削除"
-
+#property version   "4.95"
+#property description "495.各エントリフィルター削除 494.パーシャルクローズイーブン削除"
 // --- ラインカラー定数
 #define CLR_S1 2970272
 #define CLR_R1 13434880
@@ -198,19 +197,6 @@ input int                InpZigzagDepth            = 12;             // ZigZag: 
 input int                InpZigzagDeviation        = 5;              // ZigZag: Deviation
 input int                InpZigzagBackstep         = 3;              // ZigZag: Backstep
 
-input group "=== トレンド強度フィルター (ADX) ===";
-input bool          InpEnableAdxFilter = true;        // ADXフィルターを有効にする
-input ENUM_TIMEFRAMES InpAdxTimeframe    = PERIOD_H1;   // ADXの時間足
-input int           InpAdxPeriod       = 14;          // ADXの期間
-input int           InpAdxThreshold    = 23;          // エントリーを許可するADXの最低値
-
-input group "--- 動的フィルター設定 ---";
-input bool           InpEnableVolatilityFilter = true;  // ボラティリティフィルターを有効にするか
-input double         InpAtrMaxRatio          = 1.5;      // エントリーを許可する最大ATR倍率
-input bool           InpEnableTimeFilter     = true;     // 取引時間フィルターを有効にするか
-input int            InpTradingHourStart     = 15;       // 取引開始時間 (サーバー時間)
-input int            InpTradingHourEnd       = 25;       // 取引終了時間 (サーバー時間, 25 = 翌午前1時)
-
 input group "--- ダイバージェンスの可視化設定 ---";
 input bool           InpShowDivergenceSignals = true;         // ダイバージェンスサインを表示するか
 input string         InpDivSignalPrefix      = "DivSignal_";  // サインのオブジェクト名プレフィックス
@@ -301,14 +287,13 @@ input int    InpRetestExpiryBars       = 10;            // ブレイク後のリ
 // ==================================================================
 // --- グローバル変数 ---
 // ==================================================================
-LineState   g_lineStates[];   // 全てのラインの永続的な状態を管理
+LineState    g_lineStates[];   // 全てのラインの永続的な状態を管理
 double       g_pip;
 Line         allLines[];
 PositionInfo g_managedPositions[];
-int          h_macd_exec, h_macd_mid, h_macd_long, h_atr;
-int         h_atr_sl;
-int         h_adx;            // ★★★ ADXインジケータハンドルを追加 ★★★
-datetime    g_lastBarTime = 0; // ★★★ lastBar[2] を廃止し、この変数に変更
+int          h_macd_exec, h_macd_mid, h_macd_long;
+int          h_atr_sl;
+datetime     g_lastBarTime = 0;
 datetime     lastArrowTime = 0;
 bool         g_isDrawingMode = false;
 string       g_buttonName           = "DrawManualLineButton";
@@ -323,15 +308,14 @@ double       zonalFinalTPLine_Buy, zonalFinalTPLine_Sell;
 bool         isBuyTPManuallyMoved = false, isSellTPManuallyMoved = false;
 datetime     lastTradeTime;
 bool         g_ignoreNextChartClick = false;
-datetime    g_lastPivotDrawTime = 0; // ピボットを最後に描画した時間足を記憶
-ENUM_TP_MODE      prev_tp_mode      = WRONG_VALUE; // TPモードの前回値を記憶
-ENUM_TIMEFRAMES   prev_tp_timeframe = WRONG_VALUE; // TP時間足の前回値を記憶
-double      g_slLinePrice_Buy = 0;             // 買いポジション用の手動SLライン価格
-double      g_slLinePrice_Sell = 0;            // 売りポジション用の手動SLライン価格
-bool        isBuySLManuallyMoved = false;      // 買いSLラインが手動で動かされたか
-bool        isSellSLManuallyMoved = false;     // 売りSLラインが手動で動かされたか
-bool        g_isZoneVisualizationEnabled; // ★★★追加: ゾーン可視化の状態管理用★★★
-
+datetime     g_lastPivotDrawTime = 0;
+ENUM_TP_MODE      prev_tp_mode      = WRONG_VALUE;
+ENUM_TIMEFRAMES   prev_tp_timeframe = WRONG_VALUE;
+double       g_slLinePrice_Buy = 0;
+double       g_slLinePrice_Sell = 0;
+bool         isBuySLManuallyMoved = false;
+bool         isSellSLManuallyMoved = false;
+bool         g_isZoneVisualizationEnabled;
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -588,7 +572,6 @@ void OnDeinit(const int reason)
     IndicatorRelease(h_macd_exec);
     IndicatorRelease(h_macd_mid);
     IndicatorRelease(h_macd_long);
-    IndicatorRelease(h_atr);
     IndicatorRelease(zigzagHandle);
 
     PrintFormat("ApexFlowEA 終了: 理由=%d。全オブジェクトをクリーンアップしました。", reason);
@@ -607,12 +590,10 @@ int OnInit()
     h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
-    h_atr = iATR(_Symbol, InpMACD_TF_Exec, 14);
     h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
     zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-    h_adx = iADX(_Symbol, InpAdxTimeframe, InpAdxPeriod);
     
-    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_adx == INVALID_HANDLE)
+    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE)
     {
         Print("インジケータハンドルの作成に失敗しました。");
         return(INIT_FAILED);
@@ -1332,7 +1313,7 @@ void CheckExitForGroup(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す (ADXフィルター追加版)                       |
+//| 新規エントリーを探す (フィルター削除版)                           |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -1368,29 +1349,7 @@ void CheckEntry()
 
     if((buy_trigger_reason != "" || sell_trigger_reason != "") && (TimeCurrent() > lastTradeTime + 5))
     {
-        if(InpEnableTimeFilter)
-        {
-            MqlDateTime time; TimeCurrent(time); int h = time.hour; bool outside = false;
-            if(InpTradingHourStart > InpTradingHourEnd){ if(h < InpTradingHourStart && h >= InpTradingHourEnd) outside = true; }
-            else { if(h < InpTradingHourStart || h >= InpTradingHourEnd) outside = true; }
-            if(outside) { Print("エントリースキップ (時間フィルター)"); return; }
-        }
-        if(InpEnableVolatilityFilter)
-        {
-            double atr_buffer[100];
-            if(CopyBuffer(h_atr, 0, 0, 100, atr_buffer) == 100)
-            {
-                double avg_atr = 0; for(int j = 0; j < 100; j++) avg_atr += atr_buffer[j];
-                double avg_atr_100 = avg_atr / 100;
-                if(atr_buffer[0] > avg_atr_100 * InpAtrMaxRatio) { PrintFormat("エントリースキップ (ボラティリティフィルター)"); return; }
-            }
-        }
-        if(InpEnableAdxFilter)
-        {
-            double adx_buffer[2];
-            if(CopyBuffer(h_adx, 0, 0, 2, adx_buffer) < 2) { Print("ADXフィルターエラー"); return; }
-            if(adx_buffer[1] < InpAdxThreshold) { PrintFormat("エントリースキップ (ADXフィルター)"); return; }
-        }
+        // ★★★ ここにあった3つのフィルターロジックをすべて削除 ★★★
 
         MqlTick tick;
         if(!SymbolInfoTick(_Symbol, tick)) return;

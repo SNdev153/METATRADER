@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "5.01"
-#property description "501 戦略的時間足追加"
+#property version   "5.10"
+#property description "510 エントリープロトコル全実装済み コア・トレンド: 安定したトレンドでの追随。プルバック: トレンド中の押し目・戻りを狙う。アーリー: 大きなトレンドの転換点を捉える。"
 // --- ラインカラー定数
 #define CLR_S1 2970272
 #define CLR_R1 13434880
@@ -497,6 +497,7 @@ void OnTick()
     // === セクション2: 毎ティック実行する処理 (決済ロジック)           ===
     // ==================================================================
     CheckDynamicExits();
+    CheckProactiveExit();     // ★★★ この行を追加 ★★★
     CheckStageChangeExit();
     // ★★★ if/elseを削除し、集約モードの処理のみ実行 ★★★
     CheckExitForGroup(buyGroup);
@@ -1416,7 +1417,7 @@ void CheckExitForGroup(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す (MTFフィルター搭載版)                        |
+//| 新規エントリーを探す (全プロトコル対応MTFフィルター搭載版)        |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -1453,33 +1454,42 @@ void CheckEntry()
 
     if((buy_trigger_reason != "" || sell_trigger_reason != "") && (TimeCurrent() > lastTradeTime + 5))
     {
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        // ★★★ ここからが新しく追加したMTFフィルターの「関所」です ★★★
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-
         ENUM_GC_STAGE strategic_stage = DetermineStrategicStage(); // 戦略ステージを取得
         ENUM_GC_STAGE tactical_stage = DetermineBaseStage();      // 戦術ステージを取得
         
-        bool is_buy_aligned = (strategic_stage == STAGE_1 && tactical_stage == STAGE_1);
-        bool is_sell_aligned = (strategic_stage == STAGE_4 && tactical_stage == STAGE_4);
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        // ★★★ ここが「アーリー・エントリー」条件を追加した最終版フィルターです ★★★
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+
+        // 【買いアラインメント条件】
+        // 1. コア・トレンド & プルバック
+        bool is_buy_aligned = (strategic_stage == STAGE_1 && (tactical_stage == STAGE_1 || tactical_stage == STAGE_2 || tactical_stage == STAGE_6))
+                           // 2. または、アーリー・エントリー
+                           || ((strategic_stage == STAGE_5 || strategic_stage == STAGE_6) && (tactical_stage == STAGE_5 || tactical_stage == STAGE_6));
+        
+        // 【売りアラインメント条件】
+        // 1. コア・トレンド & プルバック
+        bool is_sell_aligned = (strategic_stage == STAGE_4 && (tactical_stage == STAGE_4 || tactical_stage == STAGE_5 || tactical_stage == STAGE_3))
+                            // 2. または、アーリー・エントリー
+                            || ((strategic_stage == STAGE_2 || strategic_stage == STAGE_3) && (tactical_stage == STAGE_2 || tactical_stage == STAGE_3));
+        
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★
+        // ★★★ フィルター条件の変更ここまで ★★★
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★
         
         // 買いシグナルが出ても、MTFが買いに有利でなければここで処理を中断
         if(buy_trigger_reason != "" && !is_buy_aligned)
         {
-            PrintFormat("エントリースキップ (BUY/MTF): 戦略(%s)と戦術(%s)のステージが一致しません。", EnumToString(strategic_stage), EnumToString(tactical_stage));
+            PrintFormat("エントリースキップ (BUY/MTF): 戦略(%s)と戦術(%s)のステージが一致・許容範囲にありません。", EnumToString(strategic_stage), EnumToString(tactical_stage));
             return; // フィルターで弾く
         }
 
         // 売りシグナルが出ても、MTFが売りに有利でなければここで処理を中断
         if(sell_trigger_reason != "" && !is_sell_aligned)
         {
-            PrintFormat("エントリースキップ (SELL/MTF): 戦略(%s)と戦術(%s)のステージが一致しません。", EnumToString(strategic_stage), EnumToString(tactical_stage));
+            PrintFormat("エントリースキップ (SELL/MTF): 戦略(%s)と戦術(%s)のステージが一致・許容範囲にありません。", EnumToString(strategic_stage), EnumToString(tactical_stage));
             return; // フィルターで弾く
         }
-        
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-        // ★★★ MTFフィルターここまで。ここから下は既存の処理 ★★★
-        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
         
         MqlTick tick;
         if(!SymbolInfoTick(_Symbol, tick)) return;
@@ -3335,6 +3345,59 @@ void UpdateEnvironmentAnalysis()
     // --- 警告フラグ判定 ---
     if((base_stage==STAGE_1 || base_stage==STAGE_4) && g_env_state.macd_band_state==BAND_SHRINKING) {
         g_env_state.is_stage_change_warning = true;
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】プロアクティブ手仕舞いを実行する (仕様書準拠)            |
+//+------------------------------------------------------------------+
+void CheckProactiveExit()
+{
+    // この機能はステージ変化決済のパラメータを流用してON/OFFを切り替えます
+    if (!InpEnableStageChangeExit)
+    {
+        return;
+    }
+
+    // トレンドの勢いが弱まっているという警告が出ていなければ、何もしない
+    if (!g_env_state.is_stage_change_warning)
+    {
+        return;
+    }
+
+    // 保有ポジションをループしてチェック
+    for(int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        // このEAが管理するポジションでなければスキップ
+        if (PositionGetInteger(POSITION_MAGIC) != InpMagicNumber)
+        {
+            continue;
+        }
+
+        if (PositionSelectByTicket(ticket))
+        {
+            ENUM_POSITION_TYPE pos_type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+            bool should_close = false;
+
+            // 買いポジションを持っていて、基調トレンドが上昇(ステージ1)の場合に警告が出たら決済
+            if (pos_type == POSITION_TYPE_BUY && DetermineBaseStage() == STAGE_1)
+            {
+                should_close = true;
+            }
+            // 売りポジションを持っていて、基調トレンドが下降(ステージ4)の場合に警告が出たら決済
+            else if (pos_type == POSITION_TYPE_SELL && DetermineBaseStage() == STAGE_4)
+            {
+                should_close = true;
+            }
+
+            // 決済実行
+            if (should_close)
+            {
+                PrintFormat("決済(プロアクティブ): ポジション #%d を決済します。トレンドの勢いの低下を検知しました。", ticket);
+                ClosePosition(ticket);
+            }
+        }
     }
 }
 

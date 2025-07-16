@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "5.4"
-#property description "540 スコアリングシステム改修（途中） エントリープロトコル全実装済み コア・トレンド: 安定したトレンドでの追随。プルバック: トレンド中の押し目・戻りを狙う。アーリー: 大きなトレンドの転換点を捉える。"
+#property version   "5.5"
+#property description "550 エントリトリガー追加ストキャスティクス　540 スコアリングシステム改修（途中） エントリープロトコル全実装済み コア・トレンド: 安定したトレンドでの追随。プルバック: トレンド中の押し目・戻りを狙う。アーリー: 大きなトレンドの転換点を捉える。"
 // --- ラインカラー定数
 #define CLR_S1 2970272
 #define CLR_R1 13434880
@@ -238,6 +238,13 @@ struct LineState
 // ==================================================================
 // --- 入力パラメータ (日本語表記・コメントを完全維持) ---
 // ==================================================================
+input group "=== ストキャス設定 ===";
+input int  InpStoch_K_Period    = 26; // %K期間
+input int  InpStoch_D_Period    = 3;  // %D期間
+input int  InpStoch_Slowing     = 3;  // スローイング
+input int  InpStoch_Upper_Level = 80; // 上限レベル（売りシグナル判定用）
+input int  InpStoch_Lower_Level = 20; // 下限レベル（買いシグナル判定用）
+
 input group "=== エントリーロジック設定 ===";
 input bool         InpUsePivotLines        = true;        // ピボットラインを使用する
 input ENUM_TIMEFRAMES InpPivotPeriod          = PERIOD_H1;   // ピボット時間足
@@ -417,6 +424,7 @@ double       g_slLinePrice_Sell = 0;
 bool         isBuySLManuallyMoved = false;
 bool         isSellSLManuallyMoved = false;
 bool         g_isZoneVisualizationEnabled;
+int          h_stoch; // ★★★ この行をここに追加してください ★★★
 
 // ==================================================================
 // --- 関数のプロトタイプ宣言 ---
@@ -475,18 +483,24 @@ void ProcessLineSignals()
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (個別モード削除版)                      |
+//| エキスパートティック関数                                         |
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    // ==================================================================
-    // === セクション1: 新規バーでのみ実行する処理                   ===
-    // ==================================================================
+    UpdateEnvironmentAnalysis();
+    ManageInfoPanel();
+
+    CheckDynamicExits();
+    CheckProactiveExit();
+    CheckStageChangeExit();
+    CheckExitForGroup(buyGroup);
+    CheckExitForGroup(sellGroup);
+    ManageTrailingSL(buyGroup);
+    ManageTrailingSL(sellGroup);
+
     if(IsNewBar())
     {
-        UpdateEnvironmentAnalysis();
-
-        // --- 1. 状態の検知とデータ準備 ---
+        // --- 1. データ準備 ---
         ManageManualLines(); 
 
         datetime currentPivotBarTime = iTime(_Symbol, InpPivotPeriod, 0);
@@ -498,37 +512,21 @@ void OnTick()
         UpdateLines(); 
 
         // --- 2. シグナルの生成 ---
-        ProcessLineSignals();
+        ProcessLineSignals();     // 既存のプライスアクション・シグナル
+        CheckStochasticSignal();  // ★追加: ストキャス・シグナル
 
         // --- 3. エントリー判断 ---
-        CheckZoneMacdCross();
-        CheckEntry();
-
+        CheckZoneMacdCross();     // 既存のMACDクロス・エントリー
+        CheckEntry();             // 既存の矢印検知エントリー（改修不要）
+        
         // --- 4. データと描画の同期 ---
         SyncManagedPositions();
-        
-        // ★★★ if/elseを削除し、集約モードの処理のみ実行 ★★★
         ManagePositionGroups(); 
-        
         UpdateZones();
         ManageSlLines();
         ManageZoneVisuals();
-        ManageInfoPanel();
-
         ChartRedraw(); 
     }
-
-    // ==================================================================
-    // === セクション2: 毎ティック実行する処理 (決済ロジック)           ===
-    // ==================================================================
-    CheckDynamicExits();
-    CheckProactiveExit();     // ★★★ この行を追加 ★★★
-    CheckStageChangeExit();
-    // ★★★ if/elseを削除し、集約モードの処理のみ実行 ★★★
-    CheckExitForGroup(buyGroup);
-    CheckExitForGroup(sellGroup);
-    ManageTrailingSL(buyGroup);
-    ManageTrailingSL(sellGroup);
 }
 
 //+------------------------------------------------------------------+
@@ -684,7 +682,7 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (修正版)                                  |
+//| エキスパート初期化関数                                           |
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -693,24 +691,21 @@ int OnInit()
     lastTradeTime = 0;
     g_lastPivotDrawTime = 0; 
 
-    // --- インジケーターハンドルの作成 ---
     h_macd_exec = iMACD(_Symbol, InpMACD_TF_Exec, InpMACD_Fast_Exec, InpMACD_Slow_Exec, InpMACD_Signal_Exec, PRICE_CLOSE);
     h_macd_mid = iMACD(_Symbol, InpMACD_TF_Mid, InpMACD_Fast_Mid, InpMACD_Slow_Mid, InpMACD_Signal_Mid, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, InpMACD_TF_Long, InpMACD_Fast_Long, InpMACD_Slow_Long, InpMACD_Signal_Long, PRICE_CLOSE);
     
-    // ▼▼▼ ここが最重要修正ポイント ▼▼▼
-    // スコア計算や戦術ステージ判断に使うMAのハンドルを、固定の時間足(InpGCTF)ではなく、
-    // EAが現在動作しているチャートの時間足(_Period)で作成するように変更する。
-    // これにより、チャートの時間足を切り替えると、スコアもその時間足に合わせて再計算されるようになる。
     h_gc_ma_short = iMA(_Symbol, _Period, InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
     h_gc_ma_middle = iMA(_Symbol, _Period, InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
     h_gc_ma_long = iMA(_Symbol, _Period, InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
-    // ▲▲▲ 修正ここまで ▲▲▲
 
-    // 戦略的時間足のハンドルは、入力パラメータ(InpStrategicTF)通りで変更なし
     h_gc_ma_short_strategic = iMA(_Symbol, InpStrategicTF, InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
     h_gc_ma_middle_strategic = iMA(_Symbol, InpStrategicTF, InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
     h_gc_ma_long_strategic = iMA(_Symbol, InpStrategicTF, InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+    
+    // ▼▼▼ ここから追加 ▼▼▼
+    h_stoch = iStochastic(_Symbol, _Period, InpStoch_K_Period, InpStoch_D_Period, InpStoch_Slowing, MODE_SMA, STO_LOWHIGH);
+    // ▲▲▲ ここまで追加 ▲▲▲
 
     if(h_gc_ma_short == INVALID_HANDLE || h_gc_ma_middle == INVALID_HANDLE || h_gc_ma_long == INVALID_HANDLE)
     {
@@ -721,7 +716,9 @@ int OnInit()
     h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
     zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
     
-    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE)
+    // ハンドル作成の成否チェックを修正
+    if(h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE || 
+       zigzagHandle == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || h_stoch == INVALID_HANDLE)
     {
         Print("インジケータハンドルの作成に失敗しました。");
         return(INIT_FAILED);
@@ -756,7 +753,7 @@ int OnInit()
     
     UpdateLines();
     
-    Print("ApexFlowEA v5.2.2 初期化完了 (スコア計算の時間足参照を修正)");
+    Print("ApexFlowEA v5.3 初期化完了 (Stochasticトリガー追加)");
     EventSetTimer(1); 
     return(INIT_SUCCEEDED);
 }
@@ -1739,6 +1736,52 @@ void CheckLineSignals(Line &line)
 }
 
 //+------------------------------------------------------------------+
+//| 【修正版】ストキャスティクスの確定シグナルをチェックする         |
+//+------------------------------------------------------------------+
+void CheckStochasticSignal()
+{
+    // ▼▼▼ 修正: 配列を動的配列として宣言 ▼▼▼
+    double k_buffer[], d_buffer[];
+    ArraySetAsSeries(k_buffer, true);
+    ArraySetAsSeries(d_buffer, true);
+
+    // 確定済みの足のデータを取得するため、開始位置を「1」に指定
+    if(CopyBuffer(h_stoch, 0, 1, 2, k_buffer) < 2 || CopyBuffer(h_stoch, 1, 1, 2, d_buffer) < 2)
+    {
+        return; 
+    }
+    
+    // [0]が1本前、[1]が2本前
+    double prev_d = d_buffer[1];
+    double curr_d = d_buffer[0];
+    double prev_k = k_buffer[1];
+    double curr_k = k_buffer[0];
+
+    MqlRates rates[];
+    if(CopyRates(_Symbol, _Period, 1, 1, rates) < 1) return;
+    datetime bar_time = rates[0].time;
+    double offset = InpSignalOffsetPips * g_pip;
+
+    // --- 買いシグナルの判定 ---
+    if(prev_d < InpStoch_Lower_Level && curr_d >= InpStoch_Lower_Level)
+    {
+        if(curr_k > prev_k)
+        {
+            CreateSignalObject(InpArrowPrefix + "Stoch_Buy_" + TimeToString(bar_time), bar_time, rates[0].low - offset, clrDeepSkyBlue, 233, "Stoch Buy Signal Detected");
+        }
+    }
+
+    // --- 売りシグナルの判定 ---
+    if(prev_d > InpStoch_Upper_Level && curr_d <= InpStoch_Upper_Level)
+    {
+        if(curr_k < prev_k)
+        {
+            CreateSignalObject(InpArrowPrefix + "Stoch_Sell_" + TimeToString(bar_time), bar_time, rates[0].high + offset, clrHotPink, 234, "Stoch Sell Signal Detected");
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
 //| 内部のライン「データ」を更新する (ブレイク時刻対応・名前バグ修正版) |
 //+------------------------------------------------------------------+
 void UpdateLines()
@@ -2271,7 +2314,7 @@ string TimeframeToString(ENUM_TIMEFRAMES period)
 }
 
 //+------------------------------------------------------------------+
-//| 【新デザイン版】情報パネルの管理                                 |
+//| 【タイマー分離版】情報パネルの管理                               |
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
@@ -2296,7 +2339,7 @@ void ManageInfoPanel()
     int line = 0;
     string sep = "──────────────────";
     
-    DrawPanelLine(line++, "▶ ApexFlowEA v5.2.1", "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    DrawPanelLine(line++, "▶ ApexFlowEA v5.3", "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
     DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
     DrawPanelLine(line++, "■ 戦略分析 (" + TimeframeToString(InpStrategicTF) + ")", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
@@ -2304,7 +2347,7 @@ void ManageInfoPanel()
     string strat_text = GetStageTextAndColor(g_env_state.strategic_stage, strat_color);
     DrawPanelLine(line++, "  ├ ステージ: " + strat_text, "●", clrWhite, strat_color, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    DrawPanelLine(line++, "■ 戦術分析 (" + TimeframeToString(InpGCTF) + ")", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    DrawPanelLine(line++, "■ 戦術分析 (" + TimeframeToString(_Period) + ")", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
     color tact_color;
     string tact_text = GetStageTextAndColor(g_env_state.final_stage, tact_color);
     DrawPanelLine(line++, "  ├ ステージ: " + tact_text, "●", clrWhite, tact_color, corner, anchor, InpPanelFontSize, is_lower_corner);
@@ -2323,12 +2366,10 @@ void ManageInfoPanel()
     string mode_text = GetStrategyModeTextAndColor(g_env_state.strategy_mode, g_env_state.is_buy_bias, g_env_state.is_sell_bias, mode_color);
     DrawPanelLine(line++, "  ├ モード: " + mode_text, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    // ▼▼▼ ここから修正 ▼▼▼
     string buy_score_text = "  ├ 現在スコア (Buy) : " + (string)g_env_state.currentBuyScore;
     string sell_score_text = "  └ 現在スコア (Sell): " + (string)g_env_state.currentSellScore;
     DrawPanelLine(line++, buy_score_text, " ", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
     DrawPanelLine(line++, sell_score_text, " ", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    // ▲▲▲ ここまで修正 ▲▲▲
 
     DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
     string buy_pos_text = "BUY : ---";
@@ -2339,7 +2380,8 @@ void ManageInfoPanel()
     if(sellGroup.isActive) sell_pos_text = StringFormat("SELL(%d): %.2f Lot", sellGroup.positionCount, sellGroup.totalLotSize);
     DrawPanelLine(line++, sell_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    DrawPanelLine(line++, "Next Bar: calculating...", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // ▼▼▼ "Next Bar" を表示していた以下の行を削除 ▼▼▼
+    // DrawPanelLine(line++, "Next Bar: calculating...", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 }
 
 //+------------------------------------------------------------------+
@@ -2999,38 +3041,64 @@ void UpdateZoneButtonState()
 // ==================================================================
 
 //+------------------------------------------------------------------+
-//| 1秒ごとに実行されるタイマー処理関数 (パネル統合版)      |
+//| 【強化版】1秒ごとに実行されるタイマー処理関数                    |
 //+------------------------------------------------------------------+
 void OnTimer()
 {
-    // パネルに付けたタイマーオブジェクトの固定名
-    string timer_obj_name = g_panelPrefix + "Timer";
-
-    // タイマーオブジェクトがまだ作成されていない場合は何もしない
-    if(ObjectFind(0, timer_obj_name) < 0)
+    // パネル自体が表示されていない場合は、タイマーも非表示にして終了
+    if(!InpShowInfoPanel)
     {
+        ObjectDelete(0, "ApexFlow_TimerLabel");
         return;
     }
-
-    // --- 1. 足確定までの残り時間を計算 ---
-    long time_current = TimeCurrent();
-    long time_bar_open = iTime(_Symbol, _Period, 0);
-    long period_seconds = PeriodSeconds(_Period);
-    long time_remaining = (time_bar_open + period_seconds) - time_current;
     
-    // 期間をまたいだ等の理由で残り時間がマイナスになった場合は0にする
+    // --- 1. タイマーオブジェクトが存在するか確認し、なければ作成する ---
+    string timer_obj_name = "ApexFlow_TimerLabel";
+    if(ObjectFind(0, timer_obj_name) < 0)
+    {
+        // パネルの表示設定を取得
+        ENUM_BASE_CORNER  corner = CORNER_LEFT_UPPER;
+        bool is_lower_corner = false;
+        switch(InpPanelCorner)
+        {
+            case PC_LEFT_UPPER:  corner = CORNER_LEFT_UPPER; break;
+            case PC_RIGHT_UPPER: corner = CORNER_RIGHT_UPPER; break;
+            case PC_LEFT_LOWER:  corner = CORNER_LEFT_LOWER;  is_lower_corner = true; break;
+            case PC_RIGHT_LOWER: corner = CORNER_RIGHT_LOWER; is_lower_corner = true; break;
+        }
+
+        // パネルの最終行の位置を計算
+        int total_panel_lines = 14; // パネル本体の総行数
+        int y_pos_start = p_panel_y_offset;
+        int y_step = (int)round(InpPanelFontSize * 1.5);
+        int timer_y_pos;
+        if(is_lower_corner) {
+             // パネル本体の一番下に表示
+             timer_y_pos = y_pos_start + (total_panel_lines * y_step);
+        } else {
+             timer_y_pos = y_pos_start + (total_panel_lines * y_step);
+        }
+
+        // オブジェクトを作成
+        ObjectCreate(0, timer_obj_name, OBJ_LABEL, 0, 0, 0);
+        ObjectSetInteger(0, timer_obj_name, OBJPROP_CORNER, corner);
+        ObjectSetInteger(0, timer_obj_name, OBJPROP_XDISTANCE, p_panel_x_offset);
+        ObjectSetInteger(0, timer_obj_name, OBJPROP_YDISTANCE, timer_y_pos);
+        ObjectSetString(0, timer_obj_name, OBJPROP_FONT, "Arial");
+        ObjectSetInteger(0, timer_obj_name, OBJPROP_COLOR, clrGainsboro);
+        ObjectSetInteger(0, timer_obj_name, OBJPROP_FONTSIZE, InpPanelFontSize);
+    }
+
+    // --- 2. 足確定までの残り時間を計算 ---
+    long time_remaining = (iTime(_Symbol, _Period, 0) + PeriodSeconds(_Period)) - TimeCurrent();
     if (time_remaining < 0) time_remaining = 0;
 
-    // --- 2. 表示する時間文字列を作成 (例: "04:32") ---
-    long minutes = time_remaining / 60;
-    long seconds = time_remaining % 60;
-    string timer_text = StringFormat("Next Bar: %02d:%02d", minutes, seconds);
-    
-    // --- 3. ラベルのテキストを更新 ---
+    // --- 3. 表示する時間文字列を作成し、ラベルを更新 ---
+    string timer_text = StringFormat("Next Bar: %02d:%02d", time_remaining / 60, time_remaining % 60);
     ObjectSetString(0, timer_obj_name, OBJPROP_TEXT, timer_text);
     
-    // --- 4. 画面を再描画してタイマー表示を反映 ---
-    ChartRedraw();
+    // ChartRedrawはOnTickで頻繁に呼ばれるため、OnTimerでは不要な場合が多い
+    // ChartRedraw(); 
 }
 
 //+------------------------------------------------------------------+
@@ -3063,11 +3131,11 @@ void Test_DisplayEnvironmentState()
 }
 
 //+------------------------------------------------------------------+
-//| 【修正版】カスタム仕様の大循環MACDの値を計算する                  |
+//| 【警告解消版】カスタム仕様の大循環MACDの値を計算する             |
 //+------------------------------------------------------------------+
 bool CalculateCustomMACDValues(double &main_buffer[], double &signal_buffer[], int buffer_size)
 {
-    // ★★★ 修正箇所: [buffer_size] -> [] に変更 ★★★
+    // ▼▼▼ 修正: 配列を動的配列として宣言し、リサイズする形に統一 ▼▼▼
     double middle_ma_vals[], long_ma_vals[];
     if(ArrayResize(middle_ma_vals, buffer_size) < 0 || ArrayResize(long_ma_vals, buffer_size) < 0) return false;
     
@@ -3088,6 +3156,7 @@ bool CalculateCustomMACDValues(double &main_buffer[], double &signal_buffer[], i
     double temp_signal_line[];
     if(ArrayResize(temp_signal_line, buffer_size) < 0) return false;
 
+    // シグナルラインの計算
     for(int i = 0; i < buffer_size - signal_period; i++)
     {
         double sum = 0;
@@ -3105,36 +3174,32 @@ bool CalculateCustomMACDValues(double &main_buffer[], double &signal_buffer[], i
     return true;
 }
 
-
 //+------------------------------------------------------------------+
-//| 【バグ修正・最終版】パネルの1行を描画するヘルパー関数            |
+//| 【変数宣言修正版】パネルの1行を描画するヘルパー関数              |
 //+------------------------------------------------------------------+
 void DrawPanelLine(int line_index, string text, string icon, color text_color, color icon_color,
                    ENUM_BASE_CORNER corner, ENUM_ANCHOR_POINT anchor, int font_size, bool is_lower)
 {
-    string panel_prefix = "InfoPanel_";
-    int x_pos = 10;
+    // ▼▼▼ 抜けていた変数宣言をすべて追加 ▼▼▼
+    string panel_prefix = g_panelPrefix; // グローバル変数から取得
+    int x_pos = p_panel_x_offset;
     int y_pos_start = p_panel_y_offset;
     int y_step = (int)round(font_size * 1.5);
     int icon_text_gap = 210; 
     string font = "Arial";
     int y_pos;
+    // ▲▲▲ ここまで ▲▲▲
 
     if(is_lower) {
-        // ▼▼▼ ここを修正 ▼▼▼
-        int total_lines = 15; // スコア表示で2行増えたため総行数を15に
-        // ▲▲▲ ここまで修正 ▲▲▲
+        int total_lines = 14; 
         y_pos = y_pos_start + ((total_lines - 1 - line_index) * y_step);
     } else {
         y_pos = y_pos_start + (line_index * y_step);
     }
 
     string text_obj_name;
-    if (StringFind(text, "Next Bar:") == 0) {
-        text_obj_name = "InfoPanel_Timer"; 
-    } else {
-        text_obj_name = panel_prefix + "Text_" + (string)line_index;
-    }
+    // タイマーオブジェクトはOnTimerで別管理するため、ここでは通常のラベルとして扱う
+    text_obj_name = panel_prefix + "Text_" + (string)line_index;
     string icon_obj_name = panel_prefix + "Icon_" + (string)line_index;
     
     if(ObjectFind(0, text_obj_name) < 0)

@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "5.00"
-#property description "500 MACDロジック変更"
+#property version   "5.01"
+#property description "501 戦略的時間足追加"
 // --- ラインカラー定数
 #define CLR_S1 2970272
 #define CLR_R1 13434880
@@ -29,18 +29,16 @@
 // --- 大循環分析エンジン 関連定義 ---
 // ==================================================================
 
-// --- 入力パラメータ ---
+// --- 入力パラメータ (仕様書準拠版) ---
 input group "=== 大循環分析 設定 ===";
-input ENUM_TIMEFRAMES InpGCTF                  = PERIOD_H4;    // 分析に使う時間足
-input int             InpGCMAShortPeriod       = 5;            // 短期MAの期間
-input int             InpGCMAMiddlePeriod      = 25;           // 中期MAの期間
-input int             InpGCMALongPeriod        = 75;           // 長期MAの期間
-input ENUM_MA_METHOD  InpGCMAMethod            = MODE_SMA;     // MAの種別
-// --- ここを修正しました ---
-// (iMA関数はENUM_APPLIED_PRICE型を直接受け取れないため、int型で定義するのが正解です)
+input ENUM_TIMEFRAMES InpStrategicTF          = PERIOD_D1;    // ★追加: 戦略的時間足
+input ENUM_TIMEFRAMES InpGCTF                  = PERIOD_H4;    // ★戦術的★ 分析に使う時間足
+input int             InpGCMAShortPeriod       = 5;            // 短期MAの期間 (仕様書: 5)
+input int             InpGCMAMiddlePeriod      = 20;           // 中期MAの期間 (仕様書: 20) ← ★修正
+input int             InpGCMALongPeriod        = 40;           // 長期MAの期間 (仕様書: 40) ← ★修正
+input ENUM_MA_METHOD  InpGCMAMethod            = MODE_EMA;     // MAの種別 (仕様書: EMA) ← ★修正
 input int             InpGCMAAppliedPrice      = PRICE_CLOSE;  // MAの適用価格
 input bool  InpEnableStageChangeExit = true; // ステージ変化による決済を有効にする
-
 // --- enum / struct 定義 ---
 // 大循環分析のステージを定義（先読み機能付き・最終版）
 enum ENUM_GC_STAGE
@@ -94,6 +92,9 @@ struct EnvironmentState
 int h_gc_ma_short;
 int h_gc_ma_middle;
 int h_gc_ma_long;
+int h_gc_ma_short_strategic;  // ★追加
+int h_gc_ma_middle_strategic; // ★追加
+int h_gc_ma_long_strategic;   // ★追加
 // 中期MACDのハンドルは既存の h_macd_mid を流用します
 
 // --- グローバル変数 ---
@@ -673,6 +674,10 @@ int OnInit()
     h_gc_ma_short = iMA(_Symbol, InpGCTF, InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
     h_gc_ma_middle = iMA(_Symbol, InpGCTF, InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
     h_gc_ma_long = iMA(_Symbol, InpGCTF, InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+
+    h_gc_ma_short_strategic = iMA(_Symbol, InpStrategicTF, InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+    h_gc_ma_middle_strategic = iMA(_Symbol, InpStrategicTF, InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+    h_gc_ma_long_strategic = iMA(_Symbol, InpStrategicTF, InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
 
     if(h_gc_ma_short == INVALID_HANDLE || h_gc_ma_middle == INVALID_HANDLE || h_gc_ma_long == INVALID_HANDLE)
     {
@@ -1411,7 +1416,7 @@ void CheckExitForGroup(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す (フィルター削除版)                           |
+//| 新規エントリーを探す (MTFフィルター搭載版)                        |
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -1420,6 +1425,7 @@ void CheckEntry()
     datetime currentTime = rates[0].time;
     string buy_trigger_reason = "", sell_trigger_reason = "";
 
+    // (シグナルオブジェクトを探す処理は変更なし)
     for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--)
     {
         string name = ObjectName(0, i, -1, OBJ_ARROW);
@@ -1447,8 +1453,34 @@ void CheckEntry()
 
     if((buy_trigger_reason != "" || sell_trigger_reason != "") && (TimeCurrent() > lastTradeTime + 5))
     {
-        // ★★★ ここにあった3つのフィルターロジックをすべて削除 ★★★
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        // ★★★ ここからが新しく追加したMTFフィルターの「関所」です ★★★
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
 
+        ENUM_GC_STAGE strategic_stage = DetermineStrategicStage(); // 戦略ステージを取得
+        ENUM_GC_STAGE tactical_stage = DetermineBaseStage();      // 戦術ステージを取得
+        
+        bool is_buy_aligned = (strategic_stage == STAGE_1 && tactical_stage == STAGE_1);
+        bool is_sell_aligned = (strategic_stage == STAGE_4 && tactical_stage == STAGE_4);
+        
+        // 買いシグナルが出ても、MTFが買いに有利でなければここで処理を中断
+        if(buy_trigger_reason != "" && !is_buy_aligned)
+        {
+            PrintFormat("エントリースキップ (BUY/MTF): 戦略(%s)と戦術(%s)のステージが一致しません。", EnumToString(strategic_stage), EnumToString(tactical_stage));
+            return; // フィルターで弾く
+        }
+
+        // 売りシグナルが出ても、MTFが売りに有利でなければここで処理を中断
+        if(sell_trigger_reason != "" && !is_sell_aligned)
+        {
+            PrintFormat("エントリースキップ (SELL/MTF): 戦略(%s)と戦術(%s)のステージが一致しません。", EnumToString(strategic_stage), EnumToString(tactical_stage));
+            return; // フィルターで弾く
+        }
+        
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        // ★★★ MTFフィルターここまで。ここから下は既存の処理 ★★★
+        // ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+        
         MqlTick tick;
         if(!SymbolInfoTick(_Symbol, tick)) return;
 
@@ -1477,7 +1509,7 @@ void CheckEntry()
                 if(lastOpenPrice > 0 && (lastOpenPrice - tick.bid) <= InpEntrySpacingPips * g_pip) { reason = "間隔フィルター(" + DoubleToString((lastOpenPrice - tick.bid)/g_pip, 1) + "pips差)"; }
             }
             if(reason != "") { Print("エントリースキップ (SELL): " + reason); }
-            else { ScoreComponentInfo info = CalculateMACDScore(false); if(info.total_score >= InpScore_Standard) PlaceOrder(false, tick.bid, info.total_score, sell_trigger_reason); else PrintFormat("エントリースキップ (SELL/スコア): スコア(%d)が基準値(%d)に未達です。", info.total_score, InpScore_Standard); }
+            else { ScoreComponentInfo info = CalculateMACDScore(false); if(info.total_score >= InpScore_Standard) PlaceOrder(false, tick.bid, info.total_score, sell_trigger_reason); else PrintFormat("エントリースキップ (SELL/SELL/スコア): スコア(%d)が基準値(%d)に未達です。", info.total_score, InpScore_Standard); }
         }
     }
 }
@@ -3207,7 +3239,30 @@ void DrawPanelLine(int line_index, string text, string icon, color text_color, c
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】ベースステージを判定する関数                              |
+//| 【新規】戦略的時間足のベースステージを判定する関数                |
+//+------------------------------------------------------------------+
+ENUM_GC_STAGE DetermineStrategicStage()
+{
+    // 使用するハンドルを戦略用のものに変更
+    double s[2], m[2], l[2]; // Short, Middle, Long
+    ArraySetAsSeries(s, true); ArraySetAsSeries(m, true); ArraySetAsSeries(l, true);
+    if(CopyBuffer(h_gc_ma_short_strategic, 0, 0, 2, s) < 2 || CopyBuffer(h_gc_ma_middle_strategic, 0, 0, 2, m) < 2 || CopyBuffer(h_gc_ma_long_strategic, 0, 0, 2, l) < 2) return STAGE_0;
+
+    // ロジックはDetermineBaseStageと全く同じ
+    bool is_s_up = s[0] > s[1], is_m_up = m[0] > m[1], is_l_up = l[0] > l[1];
+
+    if (s[0]>m[0] && m[0]>l[0]) { if (is_s_up && is_m_up && is_l_up) return STAGE_1; else return STAGE_10; }
+    if (m[0]>s[0] && s[0]>l[0]) { if (is_l_up) return STAGE_2; else return STAGE_20; }
+    if (m[0]>l[0] && l[0]>s[0]) { return STAGE_3; }
+    if (l[0]>m[0] && m[0]>s[0]) { if (!is_s_up && !is_m_up && !is_l_up) return STAGE_4; else return STAGE_40; }
+    if (l[0]>s[0] && s[0]>m[0]) { if (!is_l_up) return STAGE_5; else return STAGE_50; }
+    if (s[0]>l[0] && l[0]>m[0]) { return STAGE_6; }
+    
+    if (is_l_up) return STAGE_90; else return STAGE_91;
+}
+
+//+------------------------------------------------------------------+
+//| 戦術的時間足のベースステージを判定する関数                               |
 //+------------------------------------------------------------------+
 ENUM_GC_STAGE DetermineBaseStage()
 {

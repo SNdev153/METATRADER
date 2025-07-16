@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "5.10"
-#property description "510 エントリープロトコル全実装済み コア・トレンド: 安定したトレンドでの追随。プルバック: トレンド中の押し目・戻りを狙う。アーリー: 大きなトレンドの転換点を捉える。"
+#property version   "5.2"
+#property description "520 情報パネルを刷新 エントリープロトコル全実装済み コア・トレンド: 安定したトレンドでの追随。プルバック: トレンド中の押し目・戻りを狙う。アーリー: 大きなトレンドの転換点を捉える。"
 // --- ラインカラー定数
 #define CLR_S1 2970272
 #define CLR_R1 13434880
@@ -77,14 +77,33 @@ enum ENUM_MACD_BAND_STATE
     BAND_SHRINKING  // 縮小中（勢いが減速）
 };
 
-// 拡張版の環境分析結果を保持する構造体
+// 現在の戦略モードを定義
+enum ENUM_STRATEGY_MODE
+{
+    STRATEGY_NONE,         // 取引不可
+    STRATEGY_CORE_TREND,   // コア・トレンド
+    STRATEGY_PULLBACK,     // プルバック
+    STRATEGY_EARLY_ENTRY   // アーリー・エントリー
+};
+
+// 【拡張版】環境分析結果を保持する構造体
 struct EnvironmentState
 {
-    ENUM_GC_STAGE        ma_stage;             // MAの現在ステージ
-    bool                 is_k_point;           // K点を検出したか
-    bool                 is_s_point;           // S点を検出したか
-    bool                 is_strong_signal;     // K/S点がボーナス条件を満たしたか
-    ENUM_MACD_BAND_STATE macd_band_state;      // MACDの帯の状態
+    // --- MTFステージ ---
+    ENUM_GC_STAGE        strategic_stage;       // ★追加: 戦略的時間足のステージ
+    ENUM_GC_STAGE        tactical_stage;        // ★追加: 戦術的時間足のステージ
+
+    // --- 現在の戦略 ---
+    ENUM_STRATEGY_MODE   strategy_mode;         // ★追加: 現在の戦略モード
+    bool                 is_buy_bias;           // ★追加: 買いに優位性があるか
+    bool                 is_sell_bias;          // ★追加: 売りに優位性があるか
+
+    // --- 既存の分析結果 ---
+    ENUM_GC_STAGE        final_stage;           // 最終的な表示用ステージ（旧 ma_stage）
+    bool                 is_k_point;            // K点を検出したか
+    bool                 is_s_point;            // S点を検出したか
+    bool                 is_strong_signal;      // K/S点がボーナス条件を満たしたか
+    ENUM_MACD_BAND_STATE macd_band_state;       // MACDの帯の状態
     bool                 is_stage_change_warning; // ステージ変化の予兆フラグ
 };
 
@@ -2204,18 +2223,88 @@ void SyncManagedPositions()
 }
 
 //+------------------------------------------------------------------+
-//| 【日本語表示対応版】情報パネルの管理                              |
+//| 【新規】ステージ番号から表示用のテキストと色を取得する          |
+//+------------------------------------------------------------------+
+string GetStageTextAndColor(ENUM_GC_STAGE stage, color &stage_color)
+{
+    string stage_text = EnumToString(stage);
+    switch(stage)
+    {
+        case STAGE_1 : stage_text = "1 (安定上昇)";      stage_color = clrLimeGreen; break;
+        case STAGE_10: stage_text = "10 (ほぼ1)";        stage_color = clrKhaki;     break;
+        case STAGE_2 : stage_text = "2 (上昇調整)";      stage_color = clrLimeGreen; break;
+        case STAGE_20: stage_text = "20 (2の否定)";      stage_color = clrRed;       break;
+        case STAGE_3 : stage_text = "3 (下降へ転換)";    stage_color = clrKhaki;     break;
+        case STAGE_4 : stage_text = "4 (安定下降)";      stage_color = clrRed;       break;
+        case STAGE_40: stage_text = "40 (ほぼ4)";        stage_color = clrKhaki;     break;
+        case STAGE_5 : stage_text = "5 (下降調整)";      stage_color = clrRed;       break;
+        case STAGE_50: stage_text = "50 (5の否定)";      stage_color = clrLimeGreen; break;
+        case STAGE_6 : stage_text = "6 (上昇へ転換)";    stage_color = clrKhaki;     break;
+        case STAGE_90: stage_text = "90 (レンジ/順行)";  stage_color = clrDarkTurquoise; break;
+        case STAGE_91: stage_text = "91 (レンジ/逆行)";  stage_color = clrOrange;    break;
+        case STAGE_1_TO_2: stage_text = "1→2 (終焉)";   stage_color = clrKhaki;     break;
+        case STAGE_2_TO_1: stage_text = "2→1 (復帰)";   stage_color = clrLimeGreen; break;
+        case STAGE_4_TO_5: stage_text = "4→5 (終焉)";   stage_color = clrKhaki;     break;
+        case STAGE_5_TO_4: stage_text = "5→4 (復帰)";   stage_color = clrRed;       break;
+        default:       stage_text = "0 (完全中立)";      stage_color = clrGray;      break;
+    }
+    return stage_text;
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】戦略モードから表示用のテキストと色を取得する            |
+//+------------------------------------------------------------------+
+string GetStrategyModeTextAndColor(ENUM_STRATEGY_MODE mode, bool is_buy, bool is_sell, color &mode_color)
+{
+    string mode_text = "---";
+    mode_color = clrGray;
+
+    switch(mode)
+    {
+        case STRATEGY_CORE_TREND:
+            mode_text = "コア・トレンド";
+            mode_color = clrDodgerBlue;
+            break;
+        case STRATEGY_PULLBACK:
+            mode_text = "プルバック";
+            mode_color = clrMediumSeaGreen;
+            break;
+        case STRATEGY_EARLY_ENTRY:
+            mode_text = "アーリー・エントリー";
+            mode_color = clrGoldenrod;
+            break;
+        case STRATEGY_NONE:
+            mode_text = "取引不可";
+            mode_color = clrDimGray;
+            break;
+    }
+
+    if(is_buy && !is_sell) mode_text += " / ▲ BUY";
+    if(!is_buy && is_sell) mode_text += " / ▼ SELL";
+    if(is_buy && is_sell) mode_text += " / ▲▼ 競合";
+
+    return mode_text;
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】時間足のenumを文字列に変換する                          |
+//+------------------------------------------------------------------+
+string TimeframeToString(ENUM_TIMEFRAMES period)
+{
+  return(EnumToString(period));
+}
+
+//+------------------------------------------------------------------+
+//| 【新デザイン版】情報パネルの管理                                  |
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
-    // パネル非表示設定なら、関連オブジェクトを全て消して終了
     if(!InpShowInfoPanel)
     {
-        ObjectsDeleteAll(0, "InfoPanel_");
+        ObjectsDeleteAll(0, g_panelPrefix);
         return;
     }
 
-    // --- パネルの表示位置・方法を決定 ---
     ENUM_BASE_CORNER  corner = CORNER_LEFT_UPPER;
     ENUM_ANCHOR_POINT anchor = ANCHOR_LEFT;
     bool is_lower_corner = false;
@@ -2228,67 +2317,53 @@ void ManageInfoPanel()
         case PC_RIGHT_LOWER: corner = CORNER_RIGHT_LOWER; anchor = ANCHOR_RIGHT; is_lower_corner = true; break;
     }
 
-    // --- 表示内容を一行ずつ描画 ---
-    int line = 0; // 行カウンター
-
-    DrawPanelLine(line++, "Next Bar: calculating...", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "▶ ApexFlowEA v5.0", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "Magic: " + (string)InpMagicNumber, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "Spread: " + (string)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) + "p", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "──────────────────", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-
-    // 大循環分析エンジンの状態表示
-    string stage_text = "STAGE: ";
-    string stage_icon = "";
-    color  stage_icon_color = clrNONE;
+    int line = 0;
+    string sep = "──────────────────";
     
-    // ★★ ここのテキストを日本語に変更 ★★
-    switch(g_env_state.ma_stage)
-    {
-        case STAGE_1 : stage_text += "1 (安定上昇)";          stage_icon = "●"; stage_icon_color = clrLimeGreen; break;
-        case STAGE_10: stage_text += "10 (ほぼステージ1)";    stage_icon = "●"; stage_icon_color = clrKhaki;     break;
-        case STAGE_2 : stage_text += "2 (上昇調整)";          stage_icon = "●"; stage_icon_color = clrLimeGreen; break;
-        case STAGE_20: stage_text += "20 (ステージ2の否定)";  stage_icon = "●"; stage_icon_color = clrRed;       break;
-        case STAGE_3 : stage_text += "3 (下降へ転換)";        stage_icon = "●"; stage_icon_color = clrKhaki;     break;
-        case STAGE_4 : stage_text += "4 (安定下降)";          stage_icon = "●"; stage_icon_color = clrRed;       break;
-        case STAGE_40: stage_text += "40 (ほぼステージ4)";    stage_icon = "●"; stage_icon_color = clrKhaki;     break;
-        case STAGE_5 : stage_text += "5 (下降調整)";          stage_icon = "●"; stage_icon_color = clrRed;       break;
-        case STAGE_50: stage_text += "50 (ステージ5の否定)";  stage_icon = "●"; stage_icon_color = clrLimeGreen; break;
-        case STAGE_6 : stage_text += "6 (上昇へ転換)";        stage_icon = "●"; stage_icon_color = clrKhaki;     break;
-        case STAGE_90: stage_text += "90 (レンジ・順行)";     stage_icon = "●"; stage_icon_color = clrDarkTurquoise; break;
-        case STAGE_91: stage_text += "91 (レンジ・逆行)";     stage_icon = "●"; stage_icon_color = clrOrange;    break;
-        case STAGE_1_TO_2: stage_text += "1→2 (上昇の終わり)"; stage_icon = "●"; stage_icon_color = clrKhaki;    break;
-        case STAGE_2_TO_1: stage_text += "2→1 (上昇へ復帰)";   stage_icon = "●"; stage_icon_color = clrLimeGreen;break;
-        case STAGE_4_TO_5: stage_text += "4→5 (下降の終わり)"; stage_icon = "●"; stage_icon_color = clrKhaki;    break;
-        case STAGE_5_TO_4: stage_text += "5→4 (下降へ復帰)";   stage_icon = "●"; stage_icon_color = clrRed;       break;
-        default:       stage_text += "0 (完全中立)";            stage_icon = "●"; stage_icon_color = clrGray;      break;
-    }
-    DrawPanelLine(line++, stage_text, stage_icon, clrWhite, stage_icon_color, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // --- 基本情報セクション ---
+    DrawPanelLine(line++, "▶ ApexFlowEA v5.0", "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    string momentum_text = "Momentum: ";
-    string momentum_icon = "";
+    // --- 戦略分析セクション ---
+    DrawPanelLine(line++, "■ 戦略分析 (" + TimeframeToString(InpStrategicTF) + ")", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    color strat_color;
+    string strat_text = GetStageTextAndColor(g_env_state.strategic_stage, strat_color);
+    DrawPanelLine(line++, "  ├ ステージ: " + strat_text, "●", clrWhite, strat_color, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // --- 戦術分析セクション ---
+    DrawPanelLine(line++, "■ 戦術分析 (" + TimeframeToString(InpGCTF) + ")", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    color tact_color;
+    string tact_text = GetStageTextAndColor(g_env_state.final_stage, tact_color); // 表示は先読み後
+    DrawPanelLine(line++, "  ├ ステージ: " + tact_text, "●", clrWhite, tact_color, corner, anchor, InpPanelFontSize, is_lower_corner);
+    
+    string momentum_text = "---";
+    string momentum_icon = "─";
     switch(g_env_state.macd_band_state)
     {
-        case BAND_EXPANDING: momentum_text += "拡大中"; momentum_icon = "▲"; break;
-        case BAND_SHRINKING: momentum_text += "縮小中"; momentum_icon = "▼"; break;
-        default:             momentum_text += "中立";   momentum_icon = "─"; break;
+        case BAND_EXPANDING: momentum_text = "拡大中"; momentum_icon = "▲"; break;
+        case BAND_SHRINKING: momentum_text = "縮小中"; momentum_icon = "▼"; break;
     }
-    DrawPanelLine(line++, momentum_text, momentum_icon, clrGainsboro, clrWhite, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string signal_text = "Signal: -";
-    if(g_env_state.is_k_point) signal_text = "Signal: K-POINT!" + (g_env_state.is_strong_signal ? " (Strong)" : "");
-    if(g_env_state.is_s_point) signal_text = "Signal: S-POINT!" + (g_env_state.is_strong_signal ? " (Strong)" : "");
-    DrawPanelLine(line++, signal_text, "💡", clrGainsboro, g_env_state.is_k_point || g_env_state.is_s_point ? clrGold : clrDimGray, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string warning_text = "Warning: -";
-    if(g_env_state.is_stage_change_warning) warning_text = "Warning: CAUTION!";
-    DrawPanelLine(line++, warning_text, "⚠️", clrGainsboro, g_env_state.is_stage_change_warning ? clrOrangeRed : clrDimGray, corner, anchor, InpPanelFontSize, is_lower_corner);
+    DrawPanelLine(line++, "  └ 勢い　　: " + momentum_text, momentum_icon, clrWhite, clrWhite, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    DrawPanelLine(line++, "──────────────────", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // --- 戦略バイアスセクション ---
+    DrawPanelLine(line++, "■ 現在の戦略バイアス", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    color mode_color;
+    string mode_text = GetStrategyModeTextAndColor(g_env_state.strategy_mode, g_env_state.is_buy_bias, g_env_state.is_sell_bias, mode_color);
+    DrawPanelLine(line++, "  ├ モード: " + mode_text, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    // 既存のポジション情報表示
-    DrawPanelLine(line++, "Buy Group: ...", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "Sell Group: ...", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // --- ポジション情報セクション ---
+    DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    string buy_pos_text = "BUY : ---";
+    if(buyGroup.isActive) buy_pos_text = StringFormat("BUY (%d): %.2f Lot", buyGroup.positionCount, buyGroup.totalLotSize);
+    DrawPanelLine(line++, buy_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    
+    string sell_pos_text = "SELL: ---";
+    if(sellGroup.isActive) sell_pos_text = StringFormat("SELL(%d): %.2f Lot", sellGroup.positionCount, sellGroup.totalLotSize);
+    DrawPanelLine(line++, sell_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // --- タイマー行 ---
+    // この行はOnTimer()によって1秒ごとに更新される
+    DrawPanelLine(line++, "Next Bar: calculating...", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 }
 
 //+------------------------------------------------------------------+
@@ -2302,116 +2377,20 @@ void AddPanelLine(string &lines[], const string text)
 }
 
 //+------------------------------------------------------------------+
-//| 【仕様書準拠版】大循環MACDスコアを計算する                      |
-//+------------------------------------------------------------------+
-ScoreComponentInfo CalculateMACDScore(bool is_buy_signal) // 関数名を同じにして置き換えます
-{
-    ScoreComponentInfo info;
-    ZeroMemory(info);
-
-    // --- 1. 大循環分析のMA値を取得 ---
-    double ma_short[4], ma_middle[4], ma_long[4];
-    ArraySetAsSeries(ma_short, true);
-    ArraySetAsSeries(ma_middle, true);
-    ArraySetAsSeries(ma_long, true);
-
-    if (CopyBuffer(h_gc_ma_short, 0, 0, 4, ma_short) < 4 ||
-        CopyBuffer(h_gc_ma_middle, 0, 0, 4, ma_middle) < 4 ||
-        CopyBuffer(h_gc_ma_long, 0, 0, 4, ma_long) < 4)
-    {
-        Print("スコア計算エラー: 大循環MAのデータ取得に失敗しました。");
-        return info;
-    }
-
-    // --- 2. 仕様書ベースの「大循環MACD」値を計算 ---
-    // MACD1 = 短期MA - 中期MA
-    double macd1_current = ma_short[0] - ma_middle[0];
-    double macd1_past    = ma_short[3] - ma_middle[3]; // 3本前の値で角度を判定
-
-    // 帯MACD (MACD3) = 中期MA - 長期MA
-    double obi_macd_current = ma_middle[0] - ma_long[0];
-    double obi_macd_past    = ma_middle[3] - ma_long[3]; // 3本前の値で角度を判定
-
-    // --- 3. ベース条件の判定 (仕様書の概念に準拠) ---
-    // K点/S点を流用してエントリータイミングを判定
-    bool entry_timing_signal = (is_buy_signal && g_env_state.is_k_point) || (!is_buy_signal && g_env_state.is_s_point);
-
-    if (is_buy_signal)
-    {
-        // 長期トレンド = 帯が上向き
-        if (obi_macd_current > 0) info.long_zeroline = true;
-        // 角度（短期） = MACD1が上向き
-        if (macd1_current > macd1_past) info.exec_angle = true;
-        // 角度（中期/長期） = 帯MACDが上向き
-        if (obi_macd_current > obi_macd_past) info.mid_angle = true;
-        // タイミング
-        if (entry_timing_signal) info.exec_hist = true; // K点をexec_histの代用とする
-    }
-    else // 売りシグナルの場合
-    {
-        // 長期トレンド = 帯が下向き
-        if (obi_macd_current < 0) info.long_zeroline = true;
-        // 角度（短期） = MACD1が下向き
-        if (macd1_current < macd1_past) info.exec_angle = true;
-        // 角度（中期/長期） = 帯MACDが下向き
-        if (obi_macd_current < obi_macd_past) info.mid_angle = true;
-        // タイミング
-        if (entry_timing_signal) info.exec_hist = true; // S点をexec_histの代用とする
-    }
-
-    // --- 4. ベーススコアの記録 ---
-    // ダイバージェンスは仕様書に無いため、スコアリングから除外
-    if (info.long_zeroline) info.score_long_zeroline = 3; // 帯の方向性（最も重要）
-    if (info.mid_angle)     info.score_mid_angle     = 2; // 帯の拡大/縮小
-    if (info.exec_angle)    info.score_exec_angle    = 1; // 短期的な勢い
-    if (info.exec_hist)     info.score_exec_hist     = 2; // K/S点によるタイミング
-
-    // --- 5. スコア合計の計算 (重み付けは既存のパラメータを流用) ---
-    if (InpEnableWeightedScoring)
-    {
-        double weighted_score = 0;
-        weighted_score += info.score_long_zeroline * InpWeightLongTrend;
-        weighted_score += info.score_mid_angle     * InpWeightMidAngle;
-        weighted_score += info.score_exec_angle    * InpWeightExecAngle;
-        weighted_score += info.score_exec_hist     * InpWeightExecHist; // K/S点の重み
-        info.total_score = (int)round(weighted_score);
-    }
-    else
-    {
-        info.total_score = info.score_long_zeroline + info.score_mid_angle + info.score_exec_angle + info.score_exec_hist;
-    }
-
-    // --- 6. コンボボーナスとソフトVeto (既存ロジックを適用) ---
-    if(InpEnableComboBonuses)
-    {
-        // 長期トレンド(帯)とK/S点が一致した場合にボーナス
-        if(info.long_zeroline && info.exec_hist) info.total_score += InpBonusTrendDivergence; // パラメータ名を流用
-    }
-    if(InpEnableSoftVeto)
-    {
-        if(!info.long_zeroline) // 長期トレンド(帯)に逆行している場合
-        {
-            info.total_score += InpPenaltyCounterTrend;
-        }
-    }
-
-    if (info.total_score < 0) info.total_score = 0;
-
-    return info;
-}
-
-//+------------------------------------------------------------------+
-//| MACDのダイバージェンスを検出                                     |
+//| 【修正版】MACDのダイバージェンスを検出                           |
 //+------------------------------------------------------------------+
 bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
 {
+    // ★★★ 修正箇所: [size] -> [] に変更 ★★★
     MqlRates rates[];
     double macd_main[];
     ArraySetAsSeries(rates, true);
     ArraySetAsSeries(macd_main, true);
+
     int check_bars = 30;
     if(CopyRates(_Symbol, InpMACD_TF_Exec, 0, check_bars, rates) < check_bars) return false;
     if(CopyBuffer(macd_handle, 0, 0, check_bars, macd_main) < check_bars) return false;
+    
     int p1_idx = -1, p2_idx = -1;
     if(is_buy_signal)
     {
@@ -2419,16 +2398,8 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
         {
             if(rates[i].low < rates[i-1].low && rates[i].low < rates[i+1].low)
             {
-                if(p1_idx == -1)
-                {
-                    p1_idx = i;
-                }
-                else
-                {
-                    p2_idx = p1_idx;
-                    p1_idx = i;
-                    break;
-                }
+                if(p1_idx == -1) p1_idx = i;
+                else { p2_idx = p1_idx; p1_idx = i; break; }
             }
         }
         if(p1_idx > 0 && p2_idx > 0)
@@ -2447,16 +2418,8 @@ bool CheckMACDDivergence(bool is_buy_signal, int macd_handle)
         {
             if(rates[i].high > rates[i-1].high && rates[i].high > rates[i+1].high)
             {
-                if(p1_idx == -1)
-                {
-                    p1_idx = i;
-                }
-                else
-                {
-                    p2_idx = p1_idx;
-                    p1_idx = i;
-                    break;
-                }
+                if(p1_idx == -1) p1_idx = i;
+                else { p2_idx = p1_idx; p1_idx = i; break; }
             }
         }
         if(p1_idx > 0 && p2_idx > 0)
@@ -3101,15 +3064,15 @@ void OnTimer()
 }
 
 //+------------------------------------------------------------------+
-//| 【テスト用】現在の環境分析状況をチャートに表示する                 |
+//| 【テスト用】現在の環境分析状況をチャートに表示する              |
 //+------------------------------------------------------------------+
 void Test_DisplayEnvironmentState()
 {
     // 表示するテキストを作成
     string displayText = "==== GC Analysis ==== \n"; // \n は改行
     
-    // 1. MAステージを表示
-    displayText += "MA Stage: " + EnumToString(g_env_state.ma_stage) + "\n";
+    // ★★★ 修正箇所: g_env_state.ma_stage -> g_env_state.final_stage ★★★
+    displayText += "MA Stage: " + EnumToString(g_env_state.final_stage) + "\n";
     
     // 2. K点/S点を表示
     if(g_env_state.is_k_point)
@@ -3130,21 +3093,20 @@ void Test_DisplayEnvironmentState()
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】カスタム仕様の大循環MACDの値を計算する関数                |
+//| 【修正版】カスタム仕様の大循環MACDの値を計算する                  |
 //+------------------------------------------------------------------+
 bool CalculateCustomMACDValues(double &main_buffer[], double &signal_buffer[], int buffer_size)
 {
-    // 計算に必要なMAのデータを取得
+    // ★★★ 修正箇所: [buffer_size] -> [] に変更 ★★★
     double middle_ma_vals[], long_ma_vals[];
     if(ArrayResize(middle_ma_vals, buffer_size) < 0 || ArrayResize(long_ma_vals, buffer_size) < 0) return false;
     
     if(CopyBuffer(h_gc_ma_middle, 0, 0, buffer_size, middle_ma_vals) < buffer_size ||
        CopyBuffer(h_gc_ma_long,   0, 0, buffer_size, long_ma_vals) < buffer_size)
     {
-       return false; // データ取得失敗
+       return false;
     }
     
-    // メインラインを計算 (中期MA - 長期MA)
     double temp_main_line[];
     if(ArrayResize(temp_main_line, buffer_size) < 0) return false;
     for(int i = 0; i < buffer_size; i++)
@@ -3152,7 +3114,6 @@ bool CalculateCustomMACDValues(double &main_buffer[], double &signal_buffer[], i
         temp_main_line[i] = middle_ma_vals[i] - long_ma_vals[i];
     }
     
-    // シグナルラインを計算 (メインラインの9期間SMA)
     int signal_period = 9;
     double temp_signal_line[];
     if(ArrayResize(temp_signal_line, buffer_size) < 0) return false;
@@ -3167,7 +3128,6 @@ bool CalculateCustomMACDValues(double &main_buffer[], double &signal_buffer[], i
         temp_signal_line[i] = sum / signal_period;
     }
     
-    // 結果を引数の配列にコピーして完了
     if(ArrayResize(main_buffer, buffer_size) < 0 || ArrayResize(signal_buffer, buffer_size) < 0) return false;
     ArrayCopy(main_buffer, temp_main_line, 0, 0, buffer_size);
     ArrayCopy(signal_buffer, temp_signal_line, 0, 0, buffer_size);
@@ -3253,12 +3213,11 @@ void DrawPanelLine(int line_index, string text, string icon, color text_color, c
 //+------------------------------------------------------------------+
 ENUM_GC_STAGE DetermineStrategicStage()
 {
-    // 使用するハンドルを戦略用のものに変更
-    double s[2], m[2], l[2]; // Short, Middle, Long
+    // ★★★ 修正箇所: [2] -> [] に変更 ★★★
+    double s[], m[], l[];
     ArraySetAsSeries(s, true); ArraySetAsSeries(m, true); ArraySetAsSeries(l, true);
     if(CopyBuffer(h_gc_ma_short_strategic, 0, 0, 2, s) < 2 || CopyBuffer(h_gc_ma_middle_strategic, 0, 0, 2, m) < 2 || CopyBuffer(h_gc_ma_long_strategic, 0, 0, 2, l) < 2) return STAGE_0;
 
-    // ロジックはDetermineBaseStageと全く同じ
     bool is_s_up = s[0] > s[1], is_m_up = m[0] > m[1], is_l_up = l[0] > l[1];
 
     if (s[0]>m[0] && m[0]>l[0]) { if (is_s_up && is_m_up && is_l_up) return STAGE_1; else return STAGE_10; }
@@ -3272,11 +3231,12 @@ ENUM_GC_STAGE DetermineStrategicStage()
 }
 
 //+------------------------------------------------------------------+
-//| 戦術的時間足のベースステージを判定する関数                               |
+//| 【既存】戦術的時間足のベースステージを判定する関数                |
 //+------------------------------------------------------------------+
 ENUM_GC_STAGE DetermineBaseStage()
 {
-    double s[2], m[2], l[2]; // Short, Middle, Long
+    // ★★★ 修正箇所: [2] -> [] に変更 ★★★
+    double s[], m[], l[];
     ArraySetAsSeries(s, true); ArraySetAsSeries(m, true); ArraySetAsSeries(l, true);
     if(CopyBuffer(h_gc_ma_short, 0, 0, 2, s) < 2 || CopyBuffer(h_gc_ma_middle, 0, 0, 2, m) < 2 || CopyBuffer(h_gc_ma_long, 0, 0, 2, l) < 2) return STAGE_0;
 
@@ -3290,6 +3250,87 @@ ENUM_GC_STAGE DetermineBaseStage()
     if (s[0]>l[0] && l[0]>m[0]) { return STAGE_6; }
     
     if (is_l_up) return STAGE_90; else return STAGE_91;
+}
+
+
+//+------------------------------------------------------------------+
+//| 【仕様書準拠版】大循環MACDスコアを計算する                      |
+//+------------------------------------------------------------------+
+ScoreComponentInfo CalculateMACDScore(bool is_buy_signal)
+{
+    ScoreComponentInfo info;
+    ZeroMemory(info);
+
+    // ★★★ 修正箇所: [4] -> [] に変更 ★★★
+    double ma_short[], ma_middle[], ma_long[];
+    ArraySetAsSeries(ma_short, true);
+    ArraySetAsSeries(ma_middle, true);
+    ArraySetAsSeries(ma_long, true);
+
+    if (CopyBuffer(h_gc_ma_short, 0, 0, 4, ma_short) < 4 ||
+        CopyBuffer(h_gc_ma_middle, 0, 0, 4, ma_middle) < 4 ||
+        CopyBuffer(h_gc_ma_long, 0, 0, 4, ma_long) < 4)
+    {
+        Print("スコア計算エラー: 大循環MAのデータ取得に失敗しました。");
+        return info;
+    }
+    // ... この下のロジックは変更なし ...
+    double macd1_current = ma_short[0] - ma_middle[0];
+    double macd1_past    = ma_short[3] - ma_middle[3]; 
+    double obi_macd_current = ma_middle[0] - ma_long[0];
+    double obi_macd_past    = ma_middle[3] - ma_long[3]; 
+
+    bool entry_timing_signal = (is_buy_signal && g_env_state.is_k_point) || (!is_buy_signal && g_env_state.is_s_point);
+
+    if (is_buy_signal)
+    {
+        if (obi_macd_current > 0) info.long_zeroline = true;
+        if (macd1_current > macd1_past) info.exec_angle = true;
+        if (obi_macd_current > obi_macd_past) info.mid_angle = true;
+        if (entry_timing_signal) info.exec_hist = true;
+    }
+    else 
+    {
+        if (obi_macd_current < 0) info.long_zeroline = true;
+        if (macd1_current < macd1_past) info.exec_angle = true;
+        if (obi_macd_current < obi_macd_past) info.mid_angle = true;
+        if (entry_timing_signal) info.exec_hist = true; 
+    }
+
+    if (info.long_zeroline) info.score_long_zeroline = 3; 
+    if (info.mid_angle)     info.score_mid_angle     = 2; 
+    if (info.exec_angle)    info.score_exec_angle    = 1; 
+    if (info.exec_hist)     info.score_exec_hist     = 2; 
+
+    if (InpEnableWeightedScoring)
+    {
+        double weighted_score = 0;
+        weighted_score += info.score_long_zeroline * InpWeightLongTrend;
+        weighted_score += info.score_mid_angle     * InpWeightMidAngle;
+        weighted_score += info.score_exec_angle    * InpWeightExecAngle;
+        weighted_score += info.score_exec_hist     * InpWeightExecHist; 
+        info.total_score = (int)round(weighted_score);
+    }
+    else
+    {
+        info.total_score = info.score_long_zeroline + info.score_mid_angle + info.score_exec_angle + info.score_exec_hist;
+    }
+
+    if(InpEnableComboBonuses)
+    {
+        if(info.long_zeroline && info.exec_hist) info.total_score += InpBonusTrendDivergence; 
+    }
+    if(InpEnableSoftVeto)
+    {
+        if(!info.long_zeroline) 
+        {
+            info.total_score += InpPenaltyCounterTrend;
+        }
+    }
+
+    if (info.total_score < 0) info.total_score = 0;
+
+    return info;
 }
 
 //+------------------------------------------------------------------+
@@ -3308,16 +3349,41 @@ ENUM_GC_STAGE PredictNextStage(ENUM_GC_STAGE base_stage)
 }
 
 //+------------------------------------------------------------------+
-//| 【最終版】環境分析を実行する関数                                  |
+//| 【最終版】環境分析を実行し、結果をg_env_stateに格納する          |
 //+------------------------------------------------------------------+
 void UpdateEnvironmentAnalysis()
 {
-    // --- リセット ---
-    g_env_state.is_k_point = false; g_env_state.is_s_point = false;
-    g_env_state.is_strong_signal = false; g_env_state.is_stage_change_warning = false;
+    // --- 1. 構造体をリセット ---
+    ZeroMemory(g_env_state);
+
+    // --- 2. 各時間足のステージを判定 ---
+    g_env_state.strategic_stage = DetermineStrategicStage();
+    g_env_state.tactical_stage = DetermineBaseStage();
+
+    // --- 3. 現在の戦略バイアスを決定 ---
+    // (この部分は変更なし)
+    bool core_buy = (g_env_state.strategic_stage == STAGE_1 && g_env_state.tactical_stage == STAGE_1);
+    bool pullback_buy = (g_env_state.strategic_stage == STAGE_1 && (g_env_state.tactical_stage == STAGE_2 || g_env_state.tactical_stage == STAGE_6));
+    bool early_buy = ((g_env_state.strategic_stage == STAGE_5 || g_env_state.strategic_stage == STAGE_6) && (g_env_state.tactical_stage == STAGE_5 || g_env_state.tactical_stage == STAGE_6));
+
+    if(core_buy || pullback_buy || early_buy) g_env_state.is_buy_bias = true;
+
+    bool core_sell = (g_env_state.strategic_stage == STAGE_4 && g_env_state.tactical_stage == STAGE_4);
+    bool pullback_sell = (g_env_state.strategic_stage == STAGE_4 && (g_env_state.tactical_stage == STAGE_5 || g_env_state.tactical_stage == STAGE_3));
+    bool early_sell = ((g_env_state.strategic_stage == STAGE_2 || g_env_state.strategic_stage == STAGE_3) && (g_env_state.tactical_stage == STAGE_2 || g_env_state.tactical_stage == STAGE_3));
     
-    // --- MACD帯の状態を分析 ---
-    double macd_main[50], macd_signal[50];
+    if(core_sell || pullback_sell || early_sell) g_env_state.is_sell_bias = true;
+
+    if (core_buy || core_sell) g_env_state.strategy_mode = STRATEGY_CORE_TREND;
+    else if (pullback_buy || pullback_sell) g_env_state.strategy_mode = STRATEGY_PULLBACK;
+    else if (early_buy || early_sell) g_env_state.strategy_mode = STRATEGY_EARLY_ENTRY;
+    else g_env_state.strategy_mode = STRATEGY_NONE;
+    
+    // --- 4. 既存の分析（MACD帯、K/S点など）を実行 ---
+    
+    // ★★★ 修正箇所: [50] -> [] に変更 ★★★
+    double macd_main[], macd_signal[];
+
     if(!CalculateCustomMACDValues(macd_main, macd_signal, 50)) { Print("MACD計算エラー"); return; }
     ArraySetAsSeries(macd_main, true); ArraySetAsSeries(macd_signal, true);
     double hist_curr = macd_main[0] - macd_signal[0];
@@ -3326,24 +3392,20 @@ void UpdateEnvironmentAnalysis()
     else if(MathAbs(hist_curr) < MathAbs(hist_prev)) g_env_state.macd_band_state = BAND_SHRINKING;
     else g_env_state.macd_band_state = BAND_NEUTRAL;
 
-    // --- ステージ分析（ベース判定 → 予測） ---
-    ENUM_GC_STAGE base_stage = DetermineBaseStage();
-    g_env_state.ma_stage = PredictNextStage(base_stage);
+    g_env_state.final_stage = PredictNextStage(g_env_state.tactical_stage);
 
-    // --- K/S点判定 ---
-    bool is_buy_phase = (base_stage==STAGE_5 || base_stage==STAGE_6 || base_stage==STAGE_1);
+    bool is_buy_phase = (g_env_state.tactical_stage==STAGE_5 || g_env_state.tactical_stage==STAGE_6 || g_env_state.tactical_stage==STAGE_1);
     if(is_buy_phase && (macd_main[1]<=macd_signal[1] && macd_main[0]>macd_signal[0])) {
         g_env_state.is_k_point = true;
         if(macd_main[0] < 0) g_env_state.is_strong_signal = true;
     }
-    bool is_sell_phase = (base_stage==STAGE_2 || base_stage==STAGE_3 || base_stage==STAGE_4);
+    bool is_sell_phase = (g_env_state.tactical_stage==STAGE_2 || g_env_state.tactical_stage==STAGE_3 || g_env_state.tactical_stage==STAGE_4);
     if(is_sell_phase && (macd_main[1]>=macd_signal[1] && macd_main[0]<macd_signal[0])) {
         g_env_state.is_s_point = true;
         if(macd_main[0] > 0) g_env_state.is_strong_signal = true;
     }
 
-    // --- 警告フラグ判定 ---
-    if((base_stage==STAGE_1 || base_stage==STAGE_4) && g_env_state.macd_band_state==BAND_SHRINKING) {
+    if((g_env_state.tactical_stage==STAGE_1 || g_env_state.tactical_stage==STAGE_4) && g_env_state.macd_band_state==BAND_SHRINKING) {
         g_env_state.is_stage_change_warning = true;
     }
 }
@@ -3402,7 +3464,7 @@ void CheckProactiveExit()
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】ステージ変化による決済を実行する (仕様書準拠)           |
+//| 【新規】ステージ変化による決済を実行する (仕様書準拠)            |
 //+------------------------------------------------------------------+
 void CheckStageChangeExit()
 {
@@ -3412,8 +3474,8 @@ void CheckStageChangeExit()
         return;
     }
 
-    // 現在のステージを取得
-    ENUM_GC_STAGE current_stage = g_env_state.ma_stage;
+    // ★★★ 修正箇所: g_env_state.ma_stage -> g_env_state.final_stage ★★★
+    ENUM_GC_STAGE current_stage = g_env_state.final_stage;
 
     // 保有ポジションをループしてチェック
     for(int i = PositionsTotal() - 1; i >= 0; i--)

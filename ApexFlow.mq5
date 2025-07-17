@@ -755,117 +755,83 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| 【FSM版】環境分析を実行し、結果をg_env_stateに格納する
+//| 【FSM修正版】環境分析を実行し、結果をg_env_stateに格納する
 //+------------------------------------------------------------------+
 void UpdateEnvironmentAnalysis()
 {
-    // --- 0. 状態を記憶するための静的変数 ---
-    static ENUM_MASTER_STATE prev_master_state = STATE_UNKNOWN;
-
     // --- 1. 毎ティック最新のデータを計算 ---
     ZeroMemory(g_env_state); // グローバル変数をリセット
 
-    // 1-1. 傾斜状態を計算
     g_env_state.slope_short  = GetSlopeState(h_gc_ma_short, InpSlopeLookback);
     g_env_state.slope_middle = GetSlopeState(h_gc_ma_middle, InpSlopeLookback);
     g_env_state.slope_long   = GetSlopeState(h_gc_ma_long, InpSlopeLookback);
-    
-    // 1-2. 大循環MACDの値を計算
     g_env_state.macd_values = CalculateDaijunkanMACD();
-    
-    // 1-3. 伝統的ステージ番号を取得
-    g_env_state.primary_stage      = GetPrimaryStage(0);
+    g_env_state.primary_stage = GetPrimaryStage(0);
     g_env_state.prev_primary_stage = GetPrimaryStage(1);
 
-    // --- 2. 有限状態機械(FSM)による状態遷移の判定 ---
-    g_env_state.master_state = prev_master_state; 
-    
-    bool stage6_to_1 = (g_env_state.prev_primary_stage == 6 && g_env_state.primary_stage == 1);
-    bool stage1_to_2 = (g_env_state.prev_primary_stage == 1 && g_env_state.primary_stage == 2);
-    bool stage2_to_3 = (g_env_state.prev_primary_stage == 2 && g_env_state.primary_stage == 3);
-    bool stage3_to_4 = (g_env_state.prev_primary_stage == 3 && g_env_state.primary_stage == 4);
-    bool stage4_to_5 = (g_env_state.prev_primary_stage == 4 && g_env_state.primary_stage == 5);
-    bool stage5_to_6 = (g_env_state.prev_primary_stage == 5 && g_env_state.primary_stage == 6);
-    bool stage2_to_1_rev = (g_env_state.prev_primary_stage == 2 && g_env_state.primary_stage == 1);
-    bool stage5_to_4_rev = (g_env_state.prev_primary_stage == 5 && g_env_state.primary_stage == 4);
+    // --- 2. 現在の「伝統的ステージ」に基づいて、新しい「マスター状態」を決定する ---
+    ENUM_MASTER_STATE new_state = STATE_UNKNOWN;
 
-    switch(prev_master_state)
+    switch(g_env_state.primary_stage)
     {
-        case STATE_6_TRANSITION_UP:
-        case STATE_UNKNOWN:
-            if (stage6_to_1)
-            {
-                bool macd_ready = g_env_state.macd_values.is_obi_gc || (g_env_state.macd_values.obi_macd > g_env_state.macd_values.signal && g_env_state.macd_values.obi_macd_slope > 0);
-                bool slope_valid = g_env_state.slope_long >= SLOPE_FLAT;
-                if (macd_ready && slope_valid) g_env_state.master_state = STATE_1A_NASCENT;
-                else g_env_state.master_state = STATE_6_REJECTION;
-            }
+        case 1: // ステージ1 (上昇トレンド)
+            if(g_env_state.slope_long >= SLOPE_UP_WEAK)
+                new_state = STATE_1B_CONFIRMED; // 長期MAが上昇なら本物
+            else if(g_env_state.slope_short < SLOPE_FLAT)
+                new_state = STATE_1C_MATURE;    // 短期MAが失速なら成熟
+            else
+                new_state = STATE_1A_NASCENT;   // それ以外は予兆
             break;
 
-        case STATE_1A_NASCENT:
-            if (g_env_state.slope_long >= SLOPE_UP_WEAK) g_env_state.master_state = STATE_1B_CONFIRMED;
-            else if (g_env_state.slope_short < SLOPE_FLAT) g_env_state.master_state = STATE_1C_MATURE;
+        case 2: // ステージ2 (上昇トレンドの調整)
+            if(g_env_state.slope_long >= SLOPE_UP_WEAK)
+                new_state = STATE_2_PULLBACK;       // 長期MAが強ければ「押し目」
+            else
+                new_state = STATE_2_REVERSAL_WARN;  // 長期MAが弱ければ「転換警告」
             break;
 
-        case STATE_1B_CONFIRMED:
-            if (g_env_state.slope_short < SLOPE_FLAT) g_env_state.master_state = STATE_1C_MATURE;
+        case 3: // ステージ3 (下降への転換期)
+        { // ▼▼▼ 修正: 波括弧 { を追加 ▼▼▼
+            bool is_dc_ready = g_env_state.macd_values.is_obi_dc || (g_env_state.macd_values.obi_macd < g_env_state.macd_values.signal && g_env_state.macd_values.obi_macd_slope < 0);
+            bool is_slope_weak = g_env_state.slope_long <= SLOPE_FLAT;
+            if(is_dc_ready && is_slope_weak)
+                new_state = STATE_3_TRANSITION_DOWN; // 条件が揃えば下降へ移行
+            else
+                new_state = STATE_3_REJECTION;       // 条件が揃わなければ「下降失敗」
+            break;
+        } // ▲▲▲ 修正: 波括弧 } を追加 ▲▲▲
+
+        case 4: // ステージ4 (下降トレンド)
+            if(g_env_state.slope_long <= SLOPE_DOWN_WEAK)
+                new_state = STATE_4B_CONFIRMED;
+            else if(g_env_state.slope_short > SLOPE_FLAT)
+                new_state = STATE_4C_MATURE;
+            else
+                new_state = STATE_4A_NASCENT;
             break;
 
-        case STATE_1C_MATURE:
-            if(stage1_to_2)
-            {
-                if(g_env_state.slope_long >= SLOPE_UP_WEAK) g_env_state.master_state = STATE_2_PULLBACK;
-                else g_env_state.master_state = STATE_2_REVERSAL_WARN;
-            }
+        case 5: // ステージ5 (下降トレンドの調整)
+            if(g_env_state.slope_long <= SLOPE_DOWN_WEAK)
+                new_state = STATE_5_RALLY;
+            else
+                new_state = STATE_5_REVERSAL_WARN;
             break;
 
-        case STATE_2_PULLBACK:
-            if(stage2_to_1_rev) g_env_state.master_state = STATE_1B_CONFIRMED;
-            else if(stage2_to_3) g_env_state.master_state = STATE_3_TRANSITION_DOWN;
+        case 6: // ステージ6 (上昇への転換期)
+        { // ▼▼▼ 修正: 波括弧 { を追加 ▼▼▼
+            bool is_gc_ready = g_env_state.macd_values.is_obi_gc || (g_env_state.macd_values.obi_macd > g_env_state.macd_values.signal && g_env_state.macd_values.obi_macd_slope > 0);
+            bool is_slope_ok = g_env_state.slope_long >= SLOPE_FLAT;
+            if(is_gc_ready && is_slope_ok)
+                new_state = STATE_6_TRANSITION_UP;
+            else
+                new_state = STATE_6_REJECTION;
             break;
-
-        case STATE_2_REVERSAL_WARN:
-            if(stage2_to_3) g_env_state.master_state = STATE_3_TRANSITION_DOWN;
-            break;
-
-        case STATE_3_TRANSITION_DOWN:
-            if(g_env_state.primary_stage == 4)
-            {
-                bool macd_ready = g_env_state.macd_values.is_obi_dc || (g_env_state.macd_values.obi_macd < g_env_state.macd_values.signal && g_env_state.macd_values.obi_macd_slope < 0);
-                bool slope_valid = g_env_state.slope_long <= SLOPE_FLAT;
-                if(macd_ready && slope_valid) g_env_state.master_state = STATE_4A_NASCENT;
-                else g_env_state.master_state = STATE_3_REJECTION;
-            }
-            break;
-
-        case STATE_4A_NASCENT:
-            if (g_env_state.slope_long <= SLOPE_DOWN_WEAK) g_env_state.master_state = STATE_4B_CONFIRMED;
-            else if (g_env_state.slope_short > SLOPE_FLAT) g_env_state.master_state = STATE_4C_MATURE;
-            break;
-
-        case STATE_4B_CONFIRMED:
-            if (g_env_state.slope_short > SLOPE_FLAT) g_env_state.master_state = STATE_4C_MATURE;
-            break;
-
-        case STATE_4C_MATURE:
-            if(stage4_to_5)
-            {
-                if(g_env_state.slope_long <= SLOPE_DOWN_WEAK) g_env_state.master_state = STATE_5_RALLY;
-                else g_env_state.master_state = STATE_5_REVERSAL_WARN;
-            }
-            break;
-
-        case STATE_5_RALLY:
-            if(stage5_to_4_rev) g_env_state.master_state = STATE_4B_CONFIRMED;
-            else if(stage5_to_6) g_env_state.master_state = STATE_6_TRANSITION_UP;
-            break;
-
-        case STATE_5_REVERSAL_WARN:
-            if(stage5_to_6) g_env_state.master_state = STATE_6_TRANSITION_UP;
-            break;
+        } // ▲▲▲ 修正: 波括弧 } を追加 ▲▲▲
     }
-
-    prev_master_state = g_env_state.master_state;
+    
+    g_env_state.master_state = new_state;
+    
+    // --- 3. 新しい状態に基づいてスコアを更新 ---
     UpdateScoresBasedOnState();
 }
 

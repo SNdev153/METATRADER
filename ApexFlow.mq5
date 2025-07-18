@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                 Git ApexFlowEA.mq5 (統合戦略モデル)                |
 //|               (傾斜ダイナミクス + 大循環MACD 先行指標)             |
-//|                         Version: 6.1 (Full-Commented)            |
+//|                         Version: 7.x (Full-Commented)            |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "6.1"
-#property description "Ver6.1: 傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
+#property version   "7.0"
+#property description "Ver7.0: MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
 
 //+------------------------------------------------------------------+
 //|                            定数定義                              |
@@ -29,6 +29,12 @@
 #define BUTTON_RESET_SELL_SL  "Button_ResetSellSL"
 #define BUTTON_TOGGLE_ZONES   "Button_ToggleZones"
 
+// --- MTF分析用定数 ---
+#define ENUM_TIMEFRAMES_COUNT 3 // 執行足, 中間足, 上位足の合計数
+#define TF_CURRENT_INDEX      0 // 執行足 (_Period) のインデックス
+#define TF_INTERMEDIATE_INDEX 1 // 中間時間足 (例: H4) のインデックス
+#define TF_HIGHER_INDEX       2 // 上位時間足 (例: D1) のインデックス
+
 //+------------------------------------------------------------------+
 //|                  すべての enum / struct 定義                     |
 //+------------------------------------------------------------------+
@@ -37,7 +43,7 @@
 // --- 状態定義 (enum) ---
 // ==================================================================
 
-// 傾斜状態の定義
+// 傾斜状態の定義 (変更なし)
 enum ENUM_SLOPE_STATE
 {
     SLOPE_UP_STRONG,    // 強い上昇
@@ -47,7 +53,7 @@ enum ENUM_SLOPE_STATE
     SLOPE_DOWN_STRONG   // 強い下降
 };
 
-// マスター状態の定義 (EAの統合的な状態)
+// マスター状態の定義 (EAの統合的な状態) (変更なし)
 enum ENUM_MASTER_STATE
 {
     STATE_UNKNOWN,          // 不明 / 初期状態
@@ -67,14 +73,14 @@ enum ENUM_MASTER_STATE
     STATE_3_REJECTION       // [買] 3 (下降失敗/シェイクアウト)
 };
 
-// サポート/レジスタンスの種別
+// サポート/レジスタンスの種別 (変更なし)
 enum ENUM_LINE_TYPE
 {
     LINE_TYPE_SUPPORT,
     LINE_TYPE_RESISTANCE
 };
 
-// 分割決済の順序ロジック
+// 分割決済の順序ロジック (変更なし)
 enum ENUM_EXIT_LOGIC
 {
     EXIT_FIFO,          // 先入れ先出し
@@ -82,14 +88,14 @@ enum ENUM_EXIT_LOGIC
     EXIT_FAVORABLE      // 有利なポジションから決済
 };
 
-// TPラインの計算モード
+// TPラインの計算モード (変更なし)
 enum ENUM_TP_MODE
 {
     MODE_ZIGZAG,
     MODE_PIVOT
 };
 
-// パネルの表示コーナー
+// パネルの表示コーナー (変更なし)
 enum ENUM_PANEL_CORNER
 {
     PC_LEFT_UPPER,      // 左上
@@ -98,11 +104,34 @@ enum ENUM_PANEL_CORNER
     PC_RIGHT_LOWER      // 右下
 };
 
+// --- 新規: 取引バイアスの定義 ---
+enum ENUM_TRADE_BIAS
+{
+    BIAS_NONE,              // バイアスなし / 不明確
+    BIAS_CORE_TREND_BUY,    // コアトレンド (買い)
+    BIAS_CORE_TREND_SELL,   // コアトレンド (売り)
+    BIAS_PULLBACK_BUY,      // プルバック (買い / 押し目)
+    BIAS_PULLBACK_SELL,     // プルバック (売り / 戻り)
+    BIAS_EARLY_ENTRY_BUY,   // アーリーエントリー (買い)
+    BIAS_EARLY_ENTRY_SELL,  // アーリーエントリー (売り)
+    BIAS_RANGE_TRADE        // レンジトレード / 膠着
+};
+
+// --- 新規: バイアスの段階の定義 ---
+enum ENUM_BIAS_PHASE
+{
+    PHASE_NONE,         // 段階なし
+    PHASE_INITIATING,   // 初期、形成中、兆候期
+    PHASE_PROGRESSING,  // 進行中、本格期、調整期
+    PHASE_MATURING      // 後期、成熟/減速期、反転期、膠着期、準備期
+};
+
+
 // ==================================================================
 // --- データ保持構造 (struct) ---
 // ==================================================================
 
-// 大循環MACDの構成要素
+// 大循環MACDの構成要素 (変更なし)
 struct DaijunkanMACDValues
 {
     double macd1;           // 短期MA - 中期MA
@@ -114,18 +143,33 @@ struct DaijunkanMACDValues
     double obi_macd_slope;  // 帯MACDの傾き
 };
 
-// 【新版】環境分析結果を保持する構造体
+// 【新版】環境分析結果を保持する構造体 (既存を以下で上書き)
 struct EnvironmentState
 {
-    ENUM_MASTER_STATE   master_state;
-    int                 primary_stage;
-    int                 prev_primary_stage;
-    ENUM_SLOPE_STATE    slope_short;
-    ENUM_SLOPE_STATE    slope_middle;
-    ENUM_SLOPE_STATE    slope_long;
-    DaijunkanMACDValues macd_values;
-    int                 currentBuyScore;
-    int                 currentSellScore;
+    ENUM_MASTER_STATE   master_state;           // 執行足のマスター状態
+    int                 primary_stage;          // 執行足の伝統的ステージ
+    int                 prev_primary_stage;     // 執行足の前の足の伝統的ステージ (将来的に使用)
+    ENUM_SLOPE_STATE    slope_short;            // 執行足の短期MA傾き
+    ENUM_SLOPE_STATE    slope_middle;           // 執行足の中期MA傾き
+    ENUM_SLOPE_STATE    slope_long;             // 執行足の長期MA傾き
+    DaijunkanMACDValues macd_values;            // 執行足の大循環MACD値
+    int                 currentBuyScore;        // 旧スコア (必要に応じて後で統合/削除)
+    int                 currentSellScore;       // 旧スコア (必要に応じて後で統合/削除)
+
+    // --- 新規: MTF分析用フィールド ---
+    ENUM_MASTER_STATE   mtf_master_state[ENUM_TIMEFRAMES_COUNT];     // 各時間足のマスター状態
+    ENUM_SLOPE_STATE    mtf_slope_short[ENUM_TIMEFRAMES_COUNT];      // 各時間足の短期MA傾き
+    ENUM_SLOPE_STATE    mtf_slope_middle[ENUM_TIMEFRAMES_COUNT];     // 各時間足の中期MA傾き
+    ENUM_SLOPE_STATE    mtf_slope_long[ENUM_TIMEFRAMES_COUNT];       // 各時間足の長期MA傾き
+    DaijunkanMACDValues mtf_macd_values[ENUM_TIMEFRAMES_COUNT];      // 各時間足の大循環MACD値
+
+    // --- 新規: 総合優位性スコア ---
+    int                 total_buy_score;        // 統合買い優位性スコア
+    int                 total_sell_score;       // 統合売り優位性スコア
+
+    // --- 新規: 現在の取引バイアスと段階 ---
+    ENUM_TRADE_BIAS     current_trade_bias;     // 現在の取引バイアス (例: コアトレンド、プルバック)
+    ENUM_BIAS_PHASE     current_bias_phase;     // 現在のバイアスの段階 (例: 初期、進行中、後期)
 };
 
 // ライン情報を一元管理するための構造体
@@ -211,6 +255,11 @@ input double InpSlopeDownStrong = -0.3;  // 「強い下降」と判断する正
 input int    InpSlopeLookback   = 1;     // 傾き計算のルックバック期間(n)
 input int    InpSlopeAtrPeriod  = 14;    // 傾き正規化のためのATR期間(p)
 
+input group "=== MTF分析 設定 ===";
+input ENUM_TIMEFRAMES InpIntermediateTimeframe = PERIOD_H4; // 中間時間足の選択 (例: H4 = 4時間足)
+input ENUM_TIMEFRAMES InpHigherTimeframe       = PERIOD_D1; // 上位時間足の選択 (例: D1 = 日足)
+input int             InpScorePerSymbol      = 20;        // スコアバーの1●あたりの点数 (情報パネル用)
+
 input group "=== ストキャス設定 ===";
 input int  InpStoch_K_Period    = 26; // %K期間
 input int  InpStoch_D_Period    = 3;  // %D期間
@@ -224,9 +273,8 @@ input ENUM_TIMEFRAMES InpPivotPeriod        = PERIOD_H1;// ピボット時間足
 input bool   InpShowS2R2          = true;       // S2/R2ラインを表示
 input bool   InpShowS3R3          = true;       // S3/R3ラインを表示
 input int    InpPivotHistoryCount = 1;     // 表示する過去ピボットの数
-
-enum ENTRY_MODE { TOUCH_MODE, ZONE_MODE, HYBRID_MODE };
-input ENTRY_MODE      InpEntryMode          = HYBRID_MODE; // エントリーモード
+enum ENTRY_MODE { TOUCH_MODE, ZONE_MODE };
+input ENTRY_MODE      InpEntryMode          = ZONE_MODE; // エントリーモード (デフォルトをZONE_MODEなどに変更)
 input bool            InpEnableZoneMacdCross= true;     // (ゾーンモード限定) ゾーン内MACDクロスエントリーを有効にする
 input bool            InpVisualizeZones     = true;     // (ゾーン/ハイブリッド) ゾーンを可視化する
 input bool            InpBreakMode          = true;     // ブレイクモード (タッチモード用)
@@ -322,10 +370,16 @@ input int             p_ManualLine_Width    = 2;             // 手動ライン�
 //|                     グローバル変数                               |
 //+------------------------------------------------------------------+
 // --- インジケーターハンドル ---
-int h_gc_ma_short, h_gc_ma_middle, h_gc_ma_long;
 int h_macd_exec, h_macd_mid, h_macd_long;
 int h_stoch, h_atr_sl, zigzagHandle;
-int h_atr_slope; // 新しいハンドル
+int h_atr_slope; 
+
+// 新しいハンドル
+// MTF対応のインジケーターハンドル配列
+int h_gc_ma_short_mtf[ENUM_TIMEFRAMES_COUNT];
+int h_gc_ma_middle_mtf[ENUM_TIMEFRAMES_COUNT];
+int h_gc_ma_long_mtf[ENUM_TIMEFRAMES_COUNT];
+int h_atr_slope_mtf[ENUM_TIMEFRAMES_COUNT]; // 各時間足用の傾き正規化ATRハンドル
 
 // --- 状態管理 ---
 EnvironmentState g_env_state;
@@ -373,6 +427,7 @@ void UpdateScoresBasedOnState();
 void CheckStateBasedExits();
 void CheckEntry();
 void PlaceOrder(bool isBuy, double price, int score);
+void CalculateOverallBiasAndScore(); // 【新規】この行を追加
 
 // --- 分析ヘルパー関数 ---
 bool InitSlopeAtr();
@@ -453,36 +508,56 @@ int OnInit()
     g_lastBarTime = 0;
     lastTradeTime = 0;
     g_lastPivotDrawTime = 0;
-    
-    // --- ハンドル作成 ---
-    h_gc_ma_short = iMA(_Symbol, _Period, InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
-    h_gc_ma_middle = iMA(_Symbol, _Period, InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
-    h_gc_ma_long = iMA(_Symbol, _Period, InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
-    
+
+    // --- MTF対応インジケーターハンドルの作成 ---
+    // 使用する時間足の配列を定義
+    ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
+    mtf_periods[TF_CURRENT_INDEX]      = _Period; // 執行足
+    mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe; // 中間時間足
+    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;       // 上位時間足
+
+    // 各時間足のMAとATRのハンドルをループで作成
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
+    {
+        // MAハンドル
+        h_gc_ma_short_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+        h_gc_ma_middle_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+        h_gc_ma_long_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
+
+        // 傾き正規化用ATRハンドル
+        h_atr_slope_mtf[i] = iATR(_Symbol, mtf_periods[i], InpSlopeAtrPeriod);
+
+        // ハンドル作成チェック
+        if(h_gc_ma_short_mtf[i] == INVALID_HANDLE || h_gc_ma_middle_mtf[i] == INVALID_HANDLE || 
+           h_gc_ma_long_mtf[i] == INVALID_HANDLE || h_atr_slope_mtf[i] == INVALID_HANDLE)
+        {
+            PrintFormat("MTFインジケータハンドル (%s) の作成に失敗しました。EAを初期化できません。", EnumToString(mtf_periods[i]));
+            return(INIT_FAILED);
+        }
+    }
+
+    // --- その他の既存インジケーターハンドルはそのまま維持 ---
     h_stoch = iStochastic(_Symbol, _Period, InpStoch_K_Period, InpStoch_D_Period, InpStoch_Slowing, MODE_SMA, STO_LOWHIGH);
-    h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
+    h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14); // ATR SLは既存の時間足パラメータを使用
     zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-    
-    // ゾーンエントリー用の古いMACDハンドルも互換性のために残す
+
+    // ゾーンエントリー用の既存MACDハンドルも互換性のために残す (変更なし)
     h_macd_exec = iMACD(_Symbol, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE);
     h_macd_mid  = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, PERIOD_H4, 12, 26, 9, PRICE_CLOSE);
 
-    // 新しい傾斜分析用のATRハンドルを初期化
-    if(!InitSlopeAtr()) return(INIT_FAILED);
-    
-    // --- ハンドルチェック ---
-    if(h_gc_ma_short == INVALID_HANDLE || h_gc_ma_middle == INVALID_HANDLE || h_gc_ma_long == INVALID_HANDLE || 
-       h_stoch == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_atr_slope == INVALID_HANDLE)
+    // ハンドル作成全体チェック
+    if(h_stoch == INVALID_HANDLE || h_atr_sl == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE ||
+       h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE)
     {
-        Print("インジケータハンドルの作成に失敗しました。");
+        Print("一部のインジケータハンドルの作成に失敗しました。EAを初期化できません。");
         return(INIT_FAILED);
     }
-    
+
     // --- グループ初期化 ---
     InitGroup(buyGroup, true);
     InitGroup(sellGroup, false);
-    
+
     isBuyTPManuallyMoved = false;
     isSellTPManuallyMoved = false;
     g_isZoneVisualizationEnabled = InpVisualizeZones;
@@ -503,15 +578,15 @@ int OnInit()
         CreateApexButton(BUTTON_TOGGLE_ZONES, 10, 130, 120, 20, "ゾーン表示", C'80,80,80');
         UpdateZoneButtonState();
     }
-    
+
     // --- その他初期化 ---
     ChartSetInteger(0, CHART_EVENT_MOUSE_MOVE, 1, true);
     prev_tp_mode = InpTPLineMode;
     prev_tp_timeframe = InpTP_Timeframe;
-    UpdateLines();
-    
+    UpdateLines(); // ここでUpdateLines()が呼ばれるので、その中で使われるMAハンドルも後でMTF対応が必要です
+
     Print("ApexFlowEA v6.1 初期化完了 (統合戦略モデル)");
-    EventSetTimer(1);
+    EventSetTimer(1); // タイマーイベントの開始 (パネル更新用)
     return(INIT_SUCCEEDED);
 }
 
@@ -520,22 +595,28 @@ int OnInit()
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
-    EventKillTimer();
-    
-    DeleteAllEaObjects();
+    EventKillTimer(); // タイマーイベントの停止
 
-    IndicatorRelease(h_gc_ma_short);
-    IndicatorRelease(h_gc_ma_middle);
-    IndicatorRelease(h_gc_ma_long);
+    DeleteAllEaObjects(); // EAが作成した全てのチャートオブジェクトを削除
+
+    // MTF対応のインジケーターハンドルをループで解放
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
+    {
+        IndicatorRelease(h_gc_ma_short_mtf[i]);
+        IndicatorRelease(h_gc_ma_middle_mtf[i]);
+        IndicatorRelease(h_gc_ma_long_mtf[i]);
+        IndicatorRelease(h_atr_slope_mtf[i]);
+    }
+
+    // その他の既存インジケーターハンドルを解放 (変更なし)
     IndicatorRelease(h_stoch);
     IndicatorRelease(h_atr_sl);
     IndicatorRelease(zigzagHandle);
     IndicatorRelease(h_macd_exec);
     IndicatorRelease(h_macd_mid);
     IndicatorRelease(h_macd_long);
-    IndicatorRelease(h_atr_slope); // 新しいハンドルを解放
-    
-    ChartRedraw();
+
+    ChartRedraw(); // チャートの再描画
     PrintFormat("ApexFlowEA v6.1 終了: 理由=%d。", reason);
 }
 
@@ -755,84 +836,230 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| 【FSM修正版】環境分析を実行し、結果をg_env_stateに格納する
+//| 【FSM修正版】環境分析を実行し、結果をg_env_stateに格納する (MTF対応版)
 //+------------------------------------------------------------------+
 void UpdateEnvironmentAnalysis()
 {
     // --- 1. 毎ティック最新のデータを計算 ---
-    ZeroMemory(g_env_state); // グローバル変数をリセット
+    ZeroMemory(g_env_state); // グローバル環境状態をリセット
 
-    g_env_state.slope_short  = GetSlopeState(h_gc_ma_short, InpSlopeLookback);
-    g_env_state.slope_middle = GetSlopeState(h_gc_ma_middle, InpSlopeLookback);
-    g_env_state.slope_long   = GetSlopeState(h_gc_ma_long, InpSlopeLookback);
-    g_env_state.macd_values = CalculateDaijunkanMACD();
-    g_env_state.primary_stage = GetPrimaryStage(0);
-    g_env_state.prev_primary_stage = GetPrimaryStage(1);
+    // 使用する時間足の期間を設定
+    ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
+    mtf_periods[TF_CURRENT_INDEX]      = _Period; // 執行足
+    mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe; // 中間時間足
+    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;       // 上位時間足
 
-    // --- 2. 現在の「伝統的ステージ」に基づいて、新しい「マスター状態」を決定する ---
-    ENUM_MASTER_STATE new_state = STATE_UNKNOWN;
-
-    switch(g_env_state.primary_stage)
+    // 各時間足の分析データを収集
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
     {
-        case 1: // ステージ1 (上昇トレンド)
-            if(g_env_state.slope_long >= SLOPE_UP_WEAK)
-                new_state = STATE_1B_CONFIRMED; // 長期MAが上昇なら本物
-            else if(g_env_state.slope_short < SLOPE_FLAT)
-                new_state = STATE_1C_MATURE;    // 短期MAが失速なら成熟
-            else
-                new_state = STATE_1A_NASCENT;   // それ以外は予兆
-            break;
+        ENUM_TIMEFRAMES current_tf = mtf_periods[i];
 
-        case 2: // ステージ2 (上昇トレンドの調整)
-            if(g_env_state.slope_long >= SLOPE_UP_WEAK)
-                new_state = STATE_2_PULLBACK;       // 長期MAが強ければ「押し目」
-            else
-                new_state = STATE_2_REVERSAL_WARN;  // 長期MAが弱ければ「転換警告」
-            break;
-
-        case 3: // ステージ3 (下降への転換期)
-        { // ▼▼▼ 修正: 波括弧 { を追加 ▼▼▼
-            bool is_dc_ready = g_env_state.macd_values.is_obi_dc || (g_env_state.macd_values.obi_macd < g_env_state.macd_values.signal && g_env_state.macd_values.obi_macd_slope < 0);
-            bool is_slope_weak = g_env_state.slope_long <= SLOPE_FLAT;
-            if(is_dc_ready && is_slope_weak)
-                new_state = STATE_3_TRANSITION_DOWN; // 条件が揃えば下降へ移行
-            else
-                new_state = STATE_3_REJECTION;       // 条件が揃わなければ「下降失敗」
-            break;
-        } // ▲▲▲ 修正: 波括弧 } を追加 ▲▲▲
-
-        case 4: // ステージ4 (下降トレンド)
-            if(g_env_state.slope_long <= SLOPE_DOWN_WEAK)
-                new_state = STATE_4B_CONFIRMED;
-            else if(g_env_state.slope_short > SLOPE_FLAT)
-                new_state = STATE_4C_MATURE;
-            else
-                new_state = STATE_4A_NASCENT;
-            break;
-
-        case 5: // ステージ5 (下降トレンドの調整)
-            if(g_env_state.slope_long <= SLOPE_DOWN_WEAK)
-                new_state = STATE_5_RALLY;
-            else
-                new_state = STATE_5_REVERSAL_WARN;
-            break;
-
-        case 6: // ステージ6 (上昇への転換期)
-        { // ▼▼▼ 修正: 波括弧 { を追加 ▼▼▼
-            bool is_gc_ready = g_env_state.macd_values.is_obi_gc || (g_env_state.macd_values.obi_macd > g_env_state.macd_values.signal && g_env_state.macd_values.obi_macd_slope > 0);
-            bool is_slope_ok = g_env_state.slope_long >= SLOPE_FLAT;
-            if(is_gc_ready && is_slope_ok)
-                new_state = STATE_6_TRANSITION_UP;
-            else
-                new_state = STATE_6_REJECTION;
-            break;
-        } // ▲▲▲ 修正: 波括弧 } を追加 ▲▲▲
+        // 各時間足の移動平均線の傾きを計算
+        g_env_state.mtf_slope_short[i]  = GetSlopeState(h_gc_ma_short_mtf[i], InpSlopeLookback, current_tf);
+        g_env_state.mtf_slope_middle[i] = GetSlopeState(h_gc_ma_middle_mtf[i], InpSlopeLookback, current_tf);
+        g_env_state.mtf_slope_long[i]   = GetSlopeState(h_gc_ma_long_mtf[i], InpSlopeLookback, current_tf);
+        
+        // 各時間足の大循環MACDを計算
+        g_env_state.mtf_macd_values[i] = CalculateDaijunkanMACD(current_tf, h_gc_ma_short_mtf[i], h_gc_ma_middle_mtf[i], h_gc_ma_long_mtf[i]);
+        
+        // 各時間足の伝統的ステージを計算（まだサブステートへの変換はしない）
+        g_env_state.mtf_master_state[i] = GetPrimaryStage(0, current_tf, h_gc_ma_short_mtf[i], h_gc_ma_middle_mtf[i], h_gc_ma_long_mtf[i]);
     }
+
+    // --- 2. 執行足の情報をg_env_stateの単一変数にもコピー（パネル表示などの互換性のため） ---
+    g_env_state.master_state = g_env_state.mtf_master_state[TF_CURRENT_INDEX]; // ここはまだプライマリーステージが入る
+    g_env_state.primary_stage = GetPrimaryStage(0, _Period, h_gc_ma_short_mtf[TF_CURRENT_INDEX], h_gc_ma_middle_mtf[TF_CURRENT_INDEX], h_gc_ma_long_mtf[TF_CURRENT_INDEX]);
+    g_env_state.prev_primary_stage = GetPrimaryStage(1, _Period, h_gc_ma_short_mtf[TF_CURRENT_INDEX], h_gc_ma_middle_mtf[TF_CURRENT_INDEX], h_gc_ma_long_mtf[TF_CURRENT_INDEX]);
+    g_env_state.slope_short  = g_env_state.mtf_slope_short[TF_CURRENT_INDEX];
+    g_env_state.slope_middle = g_env_state.mtf_slope_middle[TF_CURRENT_INDEX];
+    g_env_state.slope_long   = g_env_state.mtf_slope_long[TF_CURRENT_INDEX];
+    g_env_state.macd_values  = g_env_state.mtf_macd_values[TF_CURRENT_INDEX];
+
+    // --- 3. 総合スコアと取引バイアスを決定する新しい関数を呼び出す ---
+    // この関数はまだ実装されていませんが、次のステップで作成します。
+    CalculateOverallBiasAndScore();
+
+    // 旧スコア更新は新しいスコアリングに置き換えられるため、この関数呼び出しは不要になるか、
+    // CalculateOverallBiasAndScore()内に統合されます。
+    // UpdateScoresBasedOnState(); // この行は後で削除またはコメントアウト
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】総合優位性スコアと取引バイアスを計算する
+//+------------------------------------------------------------------+
+void CalculateOverallBiasAndScore()
+{
+    g_env_state.total_buy_score = 0;
+    g_env_state.total_sell_score = 0;
+    g_env_state.current_trade_bias = BIAS_NONE;
+    g_env_state.current_bias_phase = PHASE_NONE;
+
+    // MTF時間足のリスト (定義済み定数を使用)
+    ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
+    mtf_periods[TF_CURRENT_INDEX]      = _Period;
+    mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe;
+    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;
+
+    // 各時間足のスコアリング係数 (重要度に合わせて調整可能)
+    int current_tf_weight = 10; // 執行足の重要度
+    int intermediate_tf_weight = 15; // 中間時間足の重要度
+    int higher_tf_weight = 20; // 上位時間足の重要度
     
-    g_env_state.master_state = new_state;
-    
-    // --- 3. 新しい状態に基づいてスコアを更新 ---
-    UpdateScoresBasedOnState();
+    int weights[ENUM_TIMEFRAMES_COUNT];
+    weights[TF_CURRENT_INDEX]      = current_tf_weight;
+    weights[TF_INTERMEDIATE_INDEX] = intermediate_tf_weight;
+    weights[TF_HIGHER_INDEX]       = higher_tf_weight;
+
+
+    // --- 1. 各時間足のステージと傾きに基づいたスコアリング ---
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
+    {
+        ENUM_MASTER_STATE master_state = g_env_state.mtf_master_state[i];
+        ENUM_SLOPE_STATE long_slope = g_env_state.mtf_slope_long[i];
+        ENUM_SLOPE_STATE short_slope = g_env_state.mtf_slope_short[i];
+        DaijunkanMACDValues macd = g_env_state.mtf_macd_values[i];
+        int weight = weights[i];
+
+        // ステージに基づくスコア
+        switch(master_state)
+        {
+            case STATE_1B_CONFIRMED: g_env_state.total_buy_score += (10 * weight / 10); break; // 高スコア
+            case STATE_1A_NASCENT:   g_env_state.total_buy_score += (7 * weight / 10);  break;
+            case STATE_2_PULLBACK:   g_env_state.total_buy_score += (6 * weight / 10);  break;
+            case STATE_6_TRANSITION_UP: g_env_state.total_buy_score += (5 * weight / 10); break;
+            case STATE_3_REJECTION:  g_env_state.total_buy_score += (9 * weight / 10);  break; // 下降失敗は買い根拠
+
+            case STATE_4B_CONFIRMED: g_env_state.total_sell_score += (10 * weight / 10); break; // 高スコア
+            case STATE_4A_NASCENT:   g_env_state.total_sell_score += (7 * weight / 10);  break;
+            case STATE_5_RALLY:      g_env_state.total_sell_score += (6 * weight / 10);  break;
+            case STATE_3_TRANSITION_DOWN: g_env_state.total_sell_score += (5 * weight / 10); break;
+            case STATE_6_REJECTION:  g_env_state.total_sell_score += (9 * weight / 10);  break; // 上昇失敗は売り根拠
+            
+            case STATE_1C_MATURE:    g_env_state.total_buy_score += (3 * weight / 10); break; // トレンド減速だがまだ上
+            case STATE_4C_MATURE:    g_env_state.total_sell_score += (3 * weight / 10); break; // トレンド減速だがまだ下
+            // Stage 2_REVERSAL_WARN や 5_REVERSAL_WARN は後で決済判断などで利用。直接スコアに加算しない。
+        }
+
+        // 長期MAの傾きに基づくスコア
+        if (long_slope == SLOPE_UP_STRONG) g_env_state.total_buy_score += (4 * weight / 10);
+        if (long_slope == SLOPE_UP_WEAK)   g_env_state.total_buy_score += (2 * weight / 10);
+        if (long_slope == SLOPE_DOWN_STRONG) g_env_state.total_sell_score += (4 * weight / 10);
+        if (long_slope == SLOPE_DOWN_WEAK)   g_env_state.total_sell_score += (2 * weight / 10);
+        
+        // 中期MAの傾きに基づくスコア (執行足に近い時間足で重み付けを強くしても良い)
+        if (short_slope == SLOPE_UP_STRONG && i == TF_CURRENT_INDEX) g_env_state.total_buy_score += (2 * weight / 10);
+        if (short_slope == SLOPE_DOWN_STRONG && i == TF_CURRENT_INDEX) g_env_state.total_sell_score += (2 * weight / 10);
+
+        // 大循環MACDに基づくスコア (各時間足共通)
+        if (macd.is_obi_gc) g_env_state.total_buy_score += (5 * weight / 10);
+        if (macd.is_obi_dc) g_env_state.total_sell_score += (5 * weight / 10);
+        if (macd.obi_macd > 0 && macd.obi_macd_slope > 0) g_env_state.total_buy_score += (3 * weight / 10); // 帯MACDが0より上で上昇中
+        if (macd.obi_macd < 0 && macd.obi_macd_slope < 0) g_env_state.total_sell_score += (3 * weight / 10); // 帯MACDが0より下で下降中
+
+        // MACDダイバージェンス（執行足のみで評価するのが一般的だが、必要ならMTFにも拡張）
+        // ここでは便宜上、CheckMACDDivergence()がシグナルを生成すると仮定し、スコア加算は別の方法で行うか、
+        // この関数内でMACDハンドルを渡して直接評価する。
+        // 現時点ではCheckMACDDivergenceはシグナル描画のみなので、ここでは直接スコアに反映しない。
+    }
+
+    // --- 2. サポート/レジスタンスとの関係に基づくスコアリング (執行足のみ) ---
+    // ProcessLineSignals() や CheckStochasticSignal() がシグナルオブジェクトを生成した際に、
+    // そのシグナルの種類に応じて別途スコアを加算するロジックを検討する。
+    // 例: シグナルオブジェクトの生成時に g_env_state.total_buy_score/total_sell_score を直接加算
+
+    // --- 3. その他のインジケーターシグナル (執行足のみ) ---
+    // ストキャスティクスなど、既存の CheckStochasticSignal() がシグナルを生成した際に、
+    // そのシグナルの種類に応じて別途スコアを加算するロジックを検討する。
+    // 例: CreateSignalObject() を呼び出す際にスコア引数を追加し、PlaceOrder() に渡すなど。
+
+    // --- 4. 総合スコアに基づいた取引バイアスと段階の決定 ---
+    // ここに、これまでの考察に基づいた複雑な判定ロジックを実装します。
+    // スコアの閾値はパラメータ化を推奨しますが、ここでは固定値で例示。
+    int buy_dominant_threshold = 30; // 買い優位と判断する最低スコア差
+    int sell_dominant_threshold = 30; // 売り優位と判断する最低スコア差
+    int range_threshold = 20; // 売り買いスコアがこの差以内ならレンジと判断する閾値
+
+    // コアトレンド判定
+    if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1B_CONFIRMED &&
+        g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_1B_CONFIRMED &&
+        g_env_state.total_buy_score > g_env_state.total_sell_score + buy_dominant_threshold)
+    {
+        g_env_state.current_trade_bias = BIAS_CORE_TREND_BUY;
+        g_env_state.current_bias_phase = PHASE_PROGRESSING; // 全て本物なら進行中
+        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1A_NASCENT || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_TRANSITION_UP)
+            g_env_state.current_bias_phase = PHASE_INITIATING; // 執行足が初期段階なら全体も初期
+        else if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1C_MATURE)
+            g_env_state.current_bias_phase = PHASE_MATURING; // 執行足が成熟なら全体も成熟
+    }
+    else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4B_CONFIRMED &&
+             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_4B_CONFIRMED &&
+             g_env_state.total_sell_score > g_env_state.total_buy_score + sell_dominant_threshold)
+    {
+        g_env_state.current_trade_bias = BIAS_CORE_TREND_SELL;
+        g_env_state.current_bias_phase = PHASE_PROGRESSING;
+        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4A_NASCENT || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_3_TRANSITION_DOWN)
+            g_env_state.current_bias_phase = PHASE_INITIATING;
+        else if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4C_MATURE)
+            g_env_state.current_bias_phase = PHASE_MATURING;
+    }
+    // プルバック判定
+    else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1B_CONFIRMED &&
+             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_2_PULLBACK &&
+             g_env_state.mtf_slope_long[TF_HIGHER_INDEX] == SLOPE_UP_STRONG &&
+             g_env_state.total_buy_score > g_env_state.total_sell_score) // 買いスコアが優勢なら
+    {
+        g_env_state.current_trade_bias = BIAS_PULLBACK_BUY;
+        g_env_state.current_bias_phase = PHASE_PROGRESSING; // 調整中
+        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_TRANSITION_UP || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1A_NASCENT)
+            g_env_state.current_bias_phase = PHASE_MATURING; // 執行足が反転開始ならプルバック終焉
+    }
+    else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4B_CONFIRMED &&
+             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_5_RALLY &&
+             g_env_state.mtf_slope_long[TF_HIGHER_INDEX] == SLOPE_DOWN_STRONG &&
+             g_env_state.total_sell_score > g_env_state.total_buy_score) // 売りスコアが優勢なら
+    {
+        g_env_state.current_trade_bias = BIAS_PULLBACK_SELL;
+        g_env_state.current_bias_phase = PHASE_PROGRESSING;
+        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_3_TRANSITION_DOWN || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4A_NASCENT)
+            g_env_state.current_bias_phase = PHASE_MATURING;
+    }
+    // アーリーエントリー判定
+    else if ((g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_6_TRANSITION_UP || g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1A_NASCENT) &&
+             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_1B_CONFIRMED &&
+             g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1B_CONFIRMED &&
+             g_env_state.total_buy_score > g_env_state.total_sell_score + buy_dominant_threshold * 0.5) // スコア差は小さめでもOK
+    {
+        g_env_state.current_trade_bias = BIAS_EARLY_ENTRY_BUY;
+        g_env_state.current_bias_phase = PHASE_INITIATING; // 上位足が初期段階なので
+    }
+    else if ((g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_3_TRANSITION_DOWN || g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4A_NASCENT) &&
+             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_4B_CONFIRMED &&
+             g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4B_CONFIRMED &&
+             g_env_state.total_sell_score > g_env_state.total_buy_score + sell_dominant_threshold * 0.5)
+    {
+        g_env_state.current_trade_bias = BIAS_EARLY_ENTRY_SELL;
+        g_env_state.current_bias_phase = PHASE_INITIATING;
+    }
+    // レンジトレード / 待機判定
+    else if (g_env_state.total_buy_score < range_threshold || g_env_state.total_sell_score < range_threshold || // どちらのスコアも低い
+             MathAbs(g_env_state.total_buy_score - g_env_state.total_sell_score) < range_threshold * 0.5) // スコアが拮抗
+    {
+        g_env_state.current_trade_bias = BIAS_RANGE_TRADE;
+        g_env_state.current_bias_phase = PHASE_PROGRESSING; // 膠着状態
+        
+        // レンジ後期 (ブレイクアウト準備期) の判定は、MACDやMAの収束/拡散の兆候などを追加で考慮
+        if ((g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope > 0.01 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd > g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal) ||
+            (g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope < -0.01 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd < g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal) )
+        {
+            g_env_state.current_bias_phase = PHASE_MATURING; // ブレイクアウト準備
+        }
+    }
+    else
+    {
+        // どの明確なバイアスにも当てはまらない場合
+        g_env_state.current_trade_bias = BIAS_NONE;
+        g_env_state.current_bias_phase = PHASE_NONE;
+    }
 }
 
 //+------------------------------------------------------------------+
@@ -863,14 +1090,14 @@ void UpdateScoresBasedOnState()
 }
 
 //+------------------------------------------------------------------+
-//| 【新設】状態に基づいて決済を判断する統合関数
+//| 【新規】状態に基づいて決済を判断する統合関数 (MTFバイアス対応版)
 //+------------------------------------------------------------------+
 void CheckStateBasedExits()
 {
     for(int i = PositionsTotal() - 1; i >= 0; i--)
     {
         ulong ticket = PositionGetTicket(i);
-        if (PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != InpMagicNumber) continue; // EA管理外のポジションは無視
 
         if (PositionSelectByTicket(ticket))
         {
@@ -878,27 +1105,58 @@ void CheckStateBasedExits()
             bool should_close = false;
             string reason = "";
 
-            if (pos_type == POSITION_TYPE_BUY)
+            // ポジション方向に応じた決済条件
+            if (pos_type == POSITION_TYPE_BUY) // 買いポジションの決済条件
             {
-                if (g_env_state.master_state == STATE_1C_MATURE || g_env_state.master_state == STATE_2_REVERSAL_WARN || g_env_state.master_state == STATE_4B_CONFIRMED || g_env_state.master_state == STATE_6_REJECTION)
+                // 戦略仕様書とMTFバイアスの考察に基づいた決済条件
+                // 例: トレンドの枯渇、転換警告、または反対方向の強いバイアスが発生した場合
+                if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1C_MATURE || // 執行足が成熟期
+                    g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_2_REVERSAL_WARN || // 執行足がトレンド転換警告
+                    g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4B_CONFIRMED || // 執行足が下降トレンド本物
+                    g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_REJECTION || // 執行足が上昇失敗
+
+                    // MTFバイアスによる強力な決済シグナル
+                    g_env_state.current_trade_bias == BIAS_CORE_TREND_SELL || // 全体バイアスが売りトレンド
+                    g_env_state.current_trade_bias == BIAS_PULLBACK_SELL ||   // 全体バイアスが売り戻り（売りチャンス）
+                    (g_env_state.current_trade_bias == BIAS_RANGE_TRADE && g_env_state.current_bias_phase == PHASE_PROGRESSING) // レンジで膠着
+                   )
                 {
                     should_close = true;
-                    reason = "状態変化(BUY決済): " + EnumToString(g_env_state.master_state);
+                    reason = StringFormat("状態変化(BUY決済): Current TF State=%s, Overall Bias=%s [%s]",
+                                         EnumToString(g_env_state.mtf_master_state[TF_CURRENT_INDEX]),
+                                         EnumToString(g_env_state.current_trade_bias),
+                                         EnumToString(g_env_state.current_bias_phase));
                 }
             }
-            else
+            else // 売りポジションの決済条件
             {
-                if (g_env_state.master_state == STATE_4C_MATURE || g_env_state.master_state == STATE_5_REVERSAL_WARN || g_env_state.master_state == STATE_1B_CONFIRMED || g_env_state.master_state == STATE_3_REJECTION)
+                // 戦略仕様書とMTFバイアスの考察に基づいた決済条件
+                // 例: トレンドの枯渇、転換警告、または反対方向の強いバイアスが発生した場合
+                if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4C_MATURE || // 執行足が成熟期
+                    g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_5_REVERSAL_WARN || // 執行足がトレンド転換警告
+                    g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1B_CONFIRMED || // 執行足が上昇トレンド本物
+                    g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_3_REJECTION || // 執行足が下降失敗
+
+                    // MTFバイアスによる強力な決済シグナル
+                    g_env_state.current_trade_bias == BIAS_CORE_TREND_BUY || // 全体バイアスが買いトレンド
+                    g_env_state.current_trade_bias == BIAS_PULLBACK_BUY ||    // 全体バイアスが買い押し目（買いチャンス）
+                    (g_env_state.current_trade_bias == BIAS_RANGE_TRADE && g_env_state.current_bias_phase == PHASE_PROGRESSING) // レンジで膠着
+                   )
                 {
                     should_close = true;
-                    reason = "状態変化(SELL決済): " + EnumToString(g_env_state.master_state);
+                    reason = StringFormat("状態変化(SELL決済): Current TF State=%s, Overall Bias=%s [%s]",
+                                         EnumToString(g_env_state.mtf_master_state[TF_CURRENT_INDEX]),
+                                         EnumToString(g_env_state.current_trade_bias),
+                                         EnumToString(g_env_state.current_bias_phase));
                 }
             }
 
+            // 時間経過による決済
             if (!should_close && InpEnableTimeExit)
             {
                 datetime open_time = (datetime)PositionGetInteger(POSITION_TIME);
                 int bars_held = iBarShift(_Symbol, _Period, open_time, false);
+                // 利益がInpExitMinProfit未満の場合のみ時間で決済
                 if (bars_held > InpExitAfterBars && (PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP)) < InpExitMinProfit)
                 {
                     should_close = true;
@@ -906,20 +1164,22 @@ void CheckStateBasedExits()
                 }
             }
 
+            // カウンターシグナル（反対シグナル）による決済
             if (!should_close && InpEnableCounterSignalExit)
             {
-                if(pos_type == POSITION_TYPE_BUY && g_env_state.currentSellScore >= InpCounterSignalScore)
+                if(pos_type == POSITION_TYPE_BUY && g_env_state.total_sell_score >= InpCounterSignalScore) // MTF総合売りスコアを使用
                 {
-                     should_close = true;
-                     reason = "反対シグナル(SELLスコア " + (string)g_env_state.currentSellScore + ")";
+                    should_close = true;
+                    reason = "反対シグナル(SELLスコア " + (string)g_env_state.total_sell_score + ")";
                 }
-                if(pos_type == POSITION_TYPE_SELL && g_env_state.currentBuyScore >= InpCounterSignalScore)
+                if(pos_type == POSITION_TYPE_SELL && g_env_state.total_buy_score >= InpCounterSignalScore) // MTF総合買いスコアを使用
                 {
-                     should_close = true;
-                     reason = "反対シグナル(BUYスコア " + (string)g_env_state.currentBuyScore + ")";
+                    should_close = true;
+                    reason = "反対シグナル(BUYスコア " + (string)g_env_state.total_buy_score + ")";
                 }
             }
 
+            // 決済実行
             if (should_close)
             {
                 PrintFormat("決済実行 (%s): ポジション #%d を決済します。", reason, ticket);
@@ -930,7 +1190,7 @@ void CheckStateBasedExits()
 }
 
 //+------------------------------------------------------------------+
-//| 【FSM版】新規エントリーを探す
+//| 【FSM版】新規エントリーを探す (MTFスコア活用版)
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -940,42 +1200,52 @@ void CheckEntry()
     datetime currentTime = rates[0].time;
     bool buy_trigger = false, sell_trigger = false;
 
+    // チャート上に表示されているエントリーシグナルオブジェクトをチェック
     for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--)
     {
         string name = ObjectName(0, i, -1, OBJ_ARROW);
+        // ドットや矢印オブジェクトのみを対象とする
         if(StringFind(name, InpArrowPrefix) != 0 && StringFind(name, InpDotPrefix) != 0) continue;
+
         datetime objTime = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME);
+        // シグナルの有効期限チェック
         if(currentTime - objTime > InpDotTimeout) continue;
 
+        // BUYまたはSELLのトリガーを検出
         if(!buy_trigger && (StringFind(name, "_Buy") > 0 || StringFind(name, "_Buy_") > 0)) buy_trigger = true;
         if(!sell_trigger && (StringFind(name, "_Sell") > 0 || StringFind(name, "_Sell_") > 0)) sell_trigger = true;
-        if(buy_trigger && sell_trigger) break;
+        if(buy_trigger && sell_trigger) break; // 両方見つかったらループを終了
     }
 
-    if((buy_trigger || sell_trigger) && (TimeCurrent() > lastTradeTime + 5))
+    // シグナルがあり、かつ前回のトレードから一定時間経過しているかチェック
+    if((buy_trigger || sell_trigger) && (TimeCurrent() > lastTradeTime + 5)) // 5秒のクールダウン
     {
         MqlTick tick;
-        if(!SymbolInfoTick(_Symbol, tick)) return;
+        if(!SymbolInfoTick(_Symbol, tick)) return; // 最新のティック情報を取得
 
-        if(buy_trigger && g_env_state.currentBuyScore >= InpEntryScore)
+        // 買いエントリー条件チェック (MTF総合買いスコアを使用)
+        if(buy_trigger && g_env_state.total_buy_score >= InpEntryScore) // ここを修正
         {
-            if (buyGroup.positionCount < InpMaxPositions) PlaceOrder(true, tick.ask, g_env_state.currentBuyScore);
+            // 最大ポジション数以下の場合は注文を発注
+            if (buyGroup.positionCount < InpMaxPositions) PlaceOrder(true, tick.ask, g_env_state.total_buy_score); // ここも修正
         }
-        
-        if(sell_trigger && g_env_state.currentSellScore >= InpEntryScore)
+
+        // 売りエントリー条件チェック (MTF総合売りスコアを使用)
+        if(sell_trigger && g_env_state.total_sell_score >= InpEntryScore) // ここを修正
         {
-            if (sellGroup.positionCount < InpMaxPositions) PlaceOrder(false, tick.bid, g_env_state.currentSellScore);
+            // 最大ポジション数以下の場合は注文を発注
+            if (sellGroup.positionCount < InpMaxPositions) PlaceOrder(false, tick.bid, g_env_state.total_sell_score); // ここも修正
         }
     }
 }
 
 //+------------------------------------------------------------------+
-//| 【FSM版】注文を発注する
+//| 【FSM版】注文を発注する (MTFスコア対応版)
 //+------------------------------------------------------------------+
-void PlaceOrder(bool isBuy, double price, int score)
+void PlaceOrder(bool isBuy, double price, int score) // 引数 'score' はMTF総合スコア
 {
     double lot_size;
-    if(InpEnableRiskBasedLot) { lot_size = CalculateRiskBasedLotSize(score); }
+    if(InpEnableRiskBasedLot) { lot_size = CalculateRiskBasedLotSize(score); } // scoreをMTF総合スコアとして渡す
     else { lot_size = InpLotSize; }
     if (lot_size <= 0) { PrintFormat("ロットサイズの計算結果が0以下のため、エントリーを中止しました。"); return; }
 
@@ -988,47 +1258,56 @@ void PlaceOrder(bool isBuy, double price, int score)
     req.type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
     req.price = NormalizeDouble(price, _Digits);
     req.magic = InpMagicNumber;
-    
-    color state_color;
-    req.comment = StringFormat("%s (State:%s Score:%d)", 
-                                (string)(isBuy ? "Buy" : "Sell"), 
-                                MasterStateToString(g_env_state.master_state, state_color), 
-                                score);
-                                
-    req.type_filling = ORDER_FILLING_FOK;
 
-    if(!OrderSend(req, res)) { Print("OrderSend error ", GetLastError()); }
+    // コメントに新しいバイアス情報を追加
+    string bias_text = EnumToString(g_env_state.current_trade_bias) + " [" + EnumToString(g_env_state.current_bias_phase) + "]";
+    req.comment = StringFormat("%s (Score:%d, Bias:%s)",
+                               (string)(isBuy ? "Buy" : "Sell"),
+                               score, // 渡されたMTF総合スコア
+                               bias_text);
+
+    req.type_filling = ORDER_FILLING_FOK; // Fill Or Kill
+
+    if(!OrderSend(req, res))
+    {
+        PrintFormat("OrderSend error: %d - %s", GetLastError(), res.comment);
+    }
     else
     {
         PrintFormat("エントリー実行: %s, Price: %.5f, Lots: %.2f", req.comment, price, lot_size);
-        lastTradeTime = TimeCurrent();
+        lastTradeTime = TimeCurrent(); // 最終トレード時間を更新
+
+        // ポジションが正常に開かれた場合
         if(res.deal > 0 && HistoryDealSelect(res.deal))
         {
             long ticket = HistoryDealGetInteger(res.deal, DEAL_POSITION_ID);
             if(PositionSelectByTicket(ticket))
             {
+                // 開かれたポジションを管理リストに追加
                 PositionInfo newPos;
                 newPos.ticket = ticket;
-                newPos.score = score;
+                newPos.score = score; // MTF総合スコアを保存
                 int size = ArraySize(g_managedPositions);
                 ArrayResize(g_managedPositions, size + 1);
                 g_managedPositions[size] = newPos;
 
+                // ストップロスを設定 (ATRベース、手動、または反対TP)
                 double sl_price = 0;
                 if(InpSlMode == SL_MODE_OPPOSITE_TP) sl_price = isBuy ? zonalFinalTPLine_Sell : zonalFinalTPLine_Buy;
                 else if(InpSlMode == SL_MODE_MANUAL) sl_price = isBuy ? g_slLinePrice_Buy : g_slLinePrice_Sell;
                 else if(InpEnableAtrSL)
                 {
                     double atr_buffer[1];
+                    // h_atr_sl はそのまま使用（InpAtrSlTimeframeで指定された時間足のATR）
                     if (CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) > 0)
                     {
                         sl_price = isBuy ? price - (atr_buffer[0] * InpAtrSlMultiplier) : price + (atr_buffer[0] * InpAtrSlMultiplier);
                     }
                 }
-                if(sl_price > 0) ModifyPositionSL(ticket, sl_price);
-                
-                ManagePositionGroups();
-                ChartRedraw();
+                if(sl_price > 0) ModifyPositionSL(ticket, sl_price); // SL設定実行
+
+                ManagePositionGroups(); // ポジショングループ情報を更新
+                ChartRedraw();          // チャートを再描画
             }
         }
     }
@@ -1057,21 +1336,34 @@ bool InitSlopeAtr()
 }
 
 //+------------------------------------------------------------------+
-//| 移動平均線の傾斜状態を取得する
+//| 移動平均線の傾斜状態を取得する (MTF対応版)
 //+------------------------------------------------------------------+
-ENUM_SLOPE_STATE GetSlopeState(int ma_handle, int lookback)
+ENUM_SLOPE_STATE GetSlopeState(int ma_handle, int lookback, ENUM_TIMEFRAMES tf_period)
 {
     double ma_buffer[];
-    if(CopyBuffer(ma_handle, 0, 0, lookback + 1, ma_buffer) < lookback + 1) return SLOPE_FLAT;
-    
+    if(CopyBuffer(ma_handle, 0, 0, lookback + 1, ma_buffer) < lookback + 1)
+    {
+        PrintFormat("GetSlopeState: MAデータ(%s)の取得に失敗。", EnumToString(tf_period));
+        return SLOPE_FLAT;
+    }
+
     double atr_buffer[];
-    if(CopyBuffer(h_atr_slope, 0, 0, 1, atr_buffer) < 1) return SLOPE_FLAT;
+    int atr_handle_index = -1; 
+    if (tf_period == _Period) atr_handle_index = TF_CURRENT_INDEX;
+    else if (tf_period == InpIntermediateTimeframe) atr_handle_index = TF_INTERMEDIATE_INDEX;
+    else if (tf_period == InpHigherTimeframe) atr_handle_index = TF_HIGHER_INDEX;
+
+    if (atr_handle_index == -1 || CopyBuffer(h_atr_slope_mtf[atr_handle_index], 0, 0, 1, atr_buffer) < 1) 
+    {
+        // PrintFormat("GetSlopeState: ATRデータ(%s)の取得に失敗。", EnumToString(tf_period)); // デバッグ用
+        return SLOPE_FLAT;
+    }
 
     double current_ma = ma_buffer[0];
     double past_ma = ma_buffer[lookback];
     double atr_value = atr_buffer[0];
 
-    if (atr_value < _Point) return SLOPE_FLAT;
+    if (atr_value < _Point) return SLOPE_FLAT; // ATRが極めて小さい場合は横ばいと見なす
 
     double normalized_slope = (current_ma - past_ma) / atr_value;
 
@@ -1079,72 +1371,85 @@ ENUM_SLOPE_STATE GetSlopeState(int ma_handle, int lookback)
     if (normalized_slope > InpSlopeUpWeak)      return SLOPE_UP_WEAK;
     if (normalized_slope < InpSlopeDownStrong)  return SLOPE_DOWN_STRONG;
     if (normalized_slope < InpSlopeDownWeak)    return SLOPE_DOWN_WEAK;
-    
+
     return SLOPE_FLAT;
 }
 
 //+------------------------------------------------------------------+
-//| 大循環MACDの値を計算する
+//| 大循環MACDの値を計算する (MTF対応版)
 //+------------------------------------------------------------------+
-DaijunkanMACDValues CalculateDaijunkanMACD()
+DaijunkanMACDValues CalculateDaijunkanMACD(ENUM_TIMEFRAMES tf_period, int short_ma_handle, int middle_ma_handle, int long_ma_handle)
 {
     DaijunkanMACDValues result;
     ZeroMemory(result);
 
-    int buffer_size = 15; 
+    int buffer_size = 15; // 計算に必要なバッファサイズ
     double short_ma[], middle_ma[], long_ma[];
-    if(CopyBuffer(h_gc_ma_short, 0, 0, buffer_size, short_ma) < buffer_size ||
-       CopyBuffer(h_gc_ma_middle, 0, 0, buffer_size, middle_ma) < buffer_size ||
-       CopyBuffer(h_gc_ma_long, 0, 0, buffer_size, long_ma) < buffer_size)
+    if(CopyBuffer(short_ma_handle, 0, 0, buffer_size, short_ma) < buffer_size ||
+       CopyBuffer(middle_ma_handle, 0, 0, buffer_size, middle_ma) < buffer_size ||
+       CopyBuffer(long_ma_handle, 0, 0, buffer_size, long_ma) < buffer_size)
     {
+        PrintFormat("CalculateDaijunkanMACD: データ(%s)の取得に失敗。", EnumToString(tf_period));
         return result;
     }
-    
+
+    // 現在のMACD値
     result.macd1 = short_ma[0] - middle_ma[0];
     result.macd2 = short_ma[0] - long_ma[0];
     result.obi_macd = middle_ma[0] - long_ma[0];
 
+    // 帯MACDのヒストリカルデータを作成し、シグナルラインを計算
     double obi_macd_history[];
     ArrayResize(obi_macd_history, buffer_size);
     for(int i = 0; i < buffer_size; i++)
     {
         obi_macd_history[i] = middle_ma[i] - long_ma[i];
     }
-    
-    double signal_sum = 0;
-    int signal_period = 9;
+
+    int signal_period = 9; // 大循環MACDのシグナル期間
     if(buffer_size >= signal_period)
     {
+        double signal_sum = 0;
         for(int i = 0; i < signal_period; i++) signal_sum += obi_macd_history[i];
         result.signal = signal_sum / signal_period;
     }
 
-    double prev_obi_macd = middle_ma[1] - long_ma[1];
-    double prev_signal_sum = 0;
-    if(buffer_size >= signal_period + 1)
+    // 帯MACDとシグナルラインのクロス判定
+    if(buffer_size >= signal_period + 1) // 1本前のデータも必要
     {
+        double prev_obi_macd = obi_macd_history[1]; // 1本前の帯MACD
+        double prev_signal_sum = 0;
         for(int i = 1; i < signal_period + 1; i++) prev_signal_sum += obi_macd_history[i];
         double prev_signal = prev_signal_sum / signal_period;
-        
+
+        // ゴールデンクロス (GC)
         if(prev_obi_macd <= prev_signal && result.obi_macd > result.signal) result.is_obi_gc = true;
+        // デッドクロス (DC)
         if(prev_obi_macd >= prev_signal && result.obi_macd < result.signal) result.is_obi_dc = true;
     }
-    
-    result.obi_macd_slope = result.obi_macd - prev_obi_macd;
+
+    // 帯MACDの傾きを計算
+    if (buffer_size >= 2) // 1本前の帯MACDが必要
+    {
+         double prev_obi_macd_for_slope = obi_macd_history[1];
+         result.obi_macd_slope = result.obi_macd - prev_obi_macd_for_slope;
+    }
+
 
     return result;
 }
 
 //+------------------------------------------------------------------+
-//| 伝統的な大循環分析のステージ番号を取得する
+//| 伝統的な大循環分析のステージ番号を取得する (MTF対応版)
 //+------------------------------------------------------------------+
-int GetPrimaryStage(int shift)
+int GetPrimaryStage(int shift, ENUM_TIMEFRAMES tf_period, int short_ma_handle, int middle_ma_handle, int long_ma_handle)
 {
     double s[], m[], l[];
-    if(CopyBuffer(h_gc_ma_short, 0, shift, 1, s) < 1 ||
-       CopyBuffer(h_gc_ma_middle, 0, shift, 1, m) < 1 ||
-       CopyBuffer(h_gc_ma_long, 0, shift, 1, l) < 1)
+    if(CopyBuffer(short_ma_handle, 0, shift, 1, s) < 1 ||
+       CopyBuffer(middle_ma_handle, 0, shift, 1, m) < 1 ||
+       CopyBuffer(long_ma_handle, 0, shift, 1, l) < 1)
     {
+        PrintFormat("GetPrimaryStage: データ(%s)の取得に失敗。", EnumToString(tf_period));
         return 0;
     }
 
@@ -1154,8 +1459,8 @@ int GetPrimaryStage(int shift)
     if (l[0] > m[0] && m[0] > s[0]) return 4;
     if (l[0] > s[0] && s[0] > m[0]) return 5;
     if (s[0] > l[0] && l[0] > m[0]) return 6;
-    
-    return 0;
+
+    return 0; // どのステージにも当てはまらない場合
 }
 
 //+------------------------------------------------------------------+
@@ -1170,7 +1475,7 @@ void ProcessLineSignals()
 }
 
 //+------------------------------------------------------------------+
-//| ラインに対するシグナルを検出する
+//| ラインに対するシグナルを検出する (HYBRID_MODE削除版)
 //+------------------------------------------------------------------+
 void CheckLineSignals(Line &line)
 {
@@ -1188,7 +1493,8 @@ void CheckLineSignals(Line &line)
     double prev_low = rates[1].low;
     double prev_close = rates[1].close;
 
-    if(InpEntryMode == TOUCH_MODE || InpEntryMode == HYBRID_MODE)
+    // InpEntryModeがTOUCH_MODEの時だけ、このブロックが動作する
+    if(InpEntryMode == TOUCH_MODE)
     {
         if(line.type == LINE_TYPE_RESISTANCE)
         {
@@ -1199,7 +1505,7 @@ void CheckLineSignals(Line &line)
             if(InpBreakMode && !g_lineStates[stateIndex].isBrokeUp && prev_open < line.price && prev_close >= line.price)
             {
                 CreateSignalObject(InpArrowPrefix + "TouchBreak_Buy_" + line.name, prevBarTime, prev_low - offset, line.signalColor, InpTouchBreakUpCode, "");
-                if (InpEntryMode != HYBRID_MODE) g_lineStates[stateIndex].isBrokeUp = true;
+                g_lineStates[stateIndex].isBrokeUp = true;
             }
         }
         else // LINE_TYPE_SUPPORT
@@ -1211,12 +1517,13 @@ void CheckLineSignals(Line &line)
             if(InpBreakMode && !g_lineStates[stateIndex].isBrokeDown && prev_open > line.price && prev_close <= line.price)
             {
                 CreateSignalObject(InpArrowPrefix + "TouchBreak_Sell_" + line.name, prevBarTime, prev_high + offset, line.signalColor, InpTouchBreakDownCode, "");
-                if (InpEntryMode != HYBRID_MODE) g_lineStates[stateIndex].isBrokeDown = true;
+                g_lineStates[stateIndex].isBrokeDown = true;
             }
         }
     }
     
-    if(InpEntryMode == ZONE_MODE || InpEntryMode == HYBRID_MODE)
+    // InpEntryModeがZONE_MODEの時だけ、このブロックが動作する
+    if(InpEntryMode == ZONE_MODE)
     {
         if (g_lineStates[stateIndex].waitForRetestUp || g_lineStates[stateIndex].waitForRetestDown)
         {
@@ -1317,7 +1624,7 @@ void CheckStochasticSignal()
 //+------------------------------------------------------------------+
 void CheckZoneMacdCross()
 {
-    if (!InpEnableZoneMacdCross || (InpEntryMode != ZONE_MODE && InpEntryMode != HYBRID_MODE)) return;
+    if (!InpEnableZoneMacdCross || (InpEntryMode != ZONE_MODE)) return;
     static datetime lastZoneCrossEntryTime = 0;
     if (TimeCurrent() < lastZoneCrossEntryTime + PeriodSeconds()) return;
 
@@ -1891,44 +2198,51 @@ void ManageTrailingSL(PositionGroup &group)
 }
 
 //+------------------------------------------------------------------+
-//| リスクベースのロットサイズを計算する
+//| リスクベースのロットサイズを計算する (MTF総合スコア対応版)
 //+------------------------------------------------------------------+
-double CalculateRiskBasedLotSize(int score)
+double CalculateRiskBasedLotSize(int total_score) // 引数をMTF総合スコアに
 {
     double sl_distance_price = 0;
     double atr_buffer[1];
+    // h_atr_sl は、InpAtrSlTimeframe で指定された時間足のATRを使用
     if (CopyBuffer(h_atr_sl, 0, 0, 1, atr_buffer) > 0)
     {
         sl_distance_price = atr_buffer[0] * InpAtrSlMultiplier;
     }
-    if (sl_distance_price <= 0) return 0.0;
+    if (sl_distance_price <= 0)
+    {
+        Print("ロット計算エラー: SL距離が算出できませんでした。");
+        return 0.0;
+    }
 
     double risk_percent_to_use = InpRiskPercent;
-    if (InpEnableHighScoreRisk && score >= InpHighScoreThreshold)
+    // 高スコア時のリスク変更をMTF総合スコアで判断
+    if (InpEnableHighScoreRisk && total_score >= InpHighScoreThreshold)
     {
         risk_percent_to_use = InpHighScoreRiskPercent;
     }
-    
+
     double risk_amount_account_ccy = AccountInfoDouble(ACCOUNT_BALANCE) * (risk_percent_to_use / 100.0);
 
     double loss_per_lot_quote_ccy = sl_distance_price * SymbolInfoDouble(_Symbol, SYMBOL_TRADE_CONTRACT_SIZE);
-    
+
     double conversion_rate = GetConversionRate(SymbolInfoString(_Symbol, SYMBOL_CURRENCY_PROFIT), AccountInfoString(ACCOUNT_CURRENCY));
-    if (conversion_rate <= 0) 
+    if (conversion_rate <= 0)
     {
         Print("ロット計算エラー: 為替レートが取得できませんでした。");
         return 0.0;
     }
-    
+
     double loss_per_lot_account_ccy = loss_per_lot_quote_ccy * conversion_rate;
     if(loss_per_lot_account_ccy <= 0) return 0.0;
-    
+
     double desired_lot = risk_amount_account_ccy / loss_per_lot_account_ccy;
-    
+
     double vol_step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
     double vol_min = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
     double vol_max = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
-    
+
+    // ロットサイズを最小・最大・ステップに正規化
     double normalized_lot = floor(desired_lot / vol_step) * vol_step;
 
     if (normalized_lot < vol_min) normalized_lot = vol_min;
@@ -1966,13 +2280,14 @@ double GetConversionRate(string from_currency, string to_currency)
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| 情報パネルの管理
+//| 情報パネルの管理 (ちらつき対策版)
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
     if(!InpShowInfoPanel)
     {
-        ObjectsDeleteAll(0, g_panelPrefix);
+        ObjectsDeleteAll(0, g_panelPrefix); // 非表示の場合は関連オブジェクトを全て削除
+        ObjectsDeleteAll(0, "ApexFlow_TimerLabel"); // タイマーラベルも削除
         return;
     }
 
@@ -1989,79 +2304,198 @@ void ManageInfoPanel()
     }
 
     int line = 0;
-    string sep = "──────────────────";
-    
+    string sep = "──────────────────"; // 区切り線
+
     // --- パネル描画 ---
-    DrawPanelLine(line++, "▶ ApexFlowEA v6.1", "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // DrawPanelLine関数内でオブジェクトの作成・更新を管理
+    DrawPanelLine(line++, "▶ ApexFlowEA v6.1 (統合戦略)", "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
     DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
-    // ▼▼▼ ここから修正 ▼▼▼
-    color state_color;
-    string state_text = MasterStateToString(g_env_state.master_state, state_color);
-    DrawPanelLine(line++, "状態: " + state_text, "●", clrWhite, state_color, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    // 伝統的ステージ番号を追加
-    string stage_num_text = "  └ 伝統的ステージ: " + (string)g_env_state.primary_stage;
-    DrawPanelLine(line++, stage_num_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    // ▲▲▲ ここまで修正 ▲▲▲
+    // B. 統合分析サマリー (最重要セクション)
+    string bias_text = EnumToString(g_env_state.current_trade_bias);
+    string phase_text = EnumToString(g_env_state.current_bias_phase);
+    color bias_color = clrGray;
+    string bias_icon = "■";
+
+    // 取引バイアスの表示と色・アイコン設定
+    switch(g_env_state.current_trade_bias)
+    {
+        case BIAS_CORE_TREND_BUY:   bias_text = "コアトレンド (買)"; bias_icon = "▲"; bias_color = clrLimeGreen; break;
+        case BIAS_CORE_TREND_SELL:  bias_text = "コアトレンド (売)"; bias_icon = "▼"; bias_color = clrRed;       break;
+        case BIAS_PULLBACK_BUY:     bias_text = "プルバック (買)";   bias_icon = "△"; bias_color = clrLightGreen;break;
+        case BIAS_PULLBACK_SELL:    bias_text = "プルバック (売)";   bias_icon = "▽"; bias_color = clrSalmon;    break;
+        case BIAS_EARLY_ENTRY_BUY:  bias_text = "アーリー (買)";     bias_icon = "▲"; bias_color = clrDeepSkyBlue;break;
+        case BIAS_EARLY_ENTRY_SELL: bias_text = "アーリー (売)";     bias_icon = "▼"; bias_color = clrHotPink;   break;
+        case BIAS_RANGE_TRADE:      bias_text = "レンジ";          bias_icon = "■"; bias_color = clrGainsboro; break;
+        default:                    bias_text = "不明";            bias_icon = "■"; bias_color = clrGray;      break;
+    }
+    // 段階の表示
+    switch(g_env_state.current_bias_phase)
+    {
+        case PHASE_INITIATING:  phase_text = "[初期]";     break;
+        case PHASE_PROGRESSING: phase_text = "[進行中]";   break;
+        case PHASE_MATURING:    phase_text = "[成熟/準備]";break;
+        default:                phase_text = "";           break;
+    }
+
+    DrawPanelLine(line++, "バイアス: " + bias_text + " " + phase_text, bias_icon, clrWhite, bias_color, corner, anchor, InpPanelFontSize + 2, is_lower_corner); // フォントサイズを少し大きく
+
+    // 総合優位性スコア (動的バーと数値)
+    string buy_score_bar = ""; 
+    int buy_bar_length = (InpScorePerSymbol > 0) ? (int)MathRound((double)g_env_state.total_buy_score / InpScorePerSymbol) : 0;
+    for(int i = 0; i < buy_bar_length; i++) buy_score_bar += "●";
+
+    string sell_score_bar = ""; 
+    int sell_bar_length = (InpScorePerSymbol > 0) ? (int)MathRound((double)g_env_state.total_sell_score / InpScorePerSymbol) : 0;
+    for(int i = 0; i < sell_bar_length; i++) sell_score_bar += "●";
+
+    DrawPanelLine(line++, "BUY優位性: " + buy_score_bar + " (" + (string)g_env_state.total_buy_score + ")", "", clrLime, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    DrawPanelLine(line++, "SELL優位性: " + sell_score_bar + " (" + (string)g_env_state.total_sell_score + ")", "", clrTomato, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // エントリー判定の表示 (InpEntryScoreをtotal_buy_score/total_sell_scoreと比較)
+    if (g_env_state.total_buy_score >= InpEntryScore) DrawPanelLine(line++, "ENTRY: BUYトリガー", "✔", clrGreen, clrGreen, corner, anchor, InpPanelFontSize, is_lower_corner);
+    else if (g_env_state.total_sell_score >= InpEntryScore) DrawPanelLine(line++, "ENTRY: SELLトリガー", "✔", clrRed, clrRed, corner, anchor, InpPanelFontSize, is_lower_corner);
+    else DrawPanelLine(line++, "ENTRY: 待機中", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
 
     DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    DrawPanelLine(line++, "■ 傾斜ダイナミクス", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "  ├ 長期MA: " + SlopeStateToString(g_env_state.slope_long), "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "  ├ 中期MA: " + SlopeStateToString(g_env_state.slope_middle), "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "  └ 短期MA: " + SlopeStateToString(g_env_state.slope_short), "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // C. 各時間足のトレンド状況 (MTFブレイクダウン)
+    DrawPanelLine(line++, "■ MTFトレンド概要", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
+    mtf_periods[TF_CURRENT_INDEX]      = _Period;
+    mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe;
+    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;
+
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
+    {
+        ENUM_TIMEFRAMES current_tf_enum = mtf_periods[i];
+        string tf_name;
+        if (i == TF_CURRENT_INDEX) tf_name = EnumToString(_Period) + "(現)";
+        else if (i == TF_INTERMEDIATE_INDEX) tf_name = EnumToString(InpIntermediateTimeframe) + "(中)";
+        else tf_name = EnumToString(InpHigherTimeframe) + "(高)";
+
+        // ステージ表示
+        color stage_color;
+        string stage_text = MasterStateToString(g_env_state.mtf_master_state[i], stage_color);
+        DrawPanelLine(line++, "  TF(" + tf_name + "): " + stage_text, "", stage_color, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+        // 長期MA傾き表示
+        string long_slope_text = SlopeStateToString(g_env_state.mtf_slope_long[i]);
+        DrawPanelLine(line++, "    ├ 長期MA: " + long_slope_text, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+        // 帯MACD表示
+        string obi_macd_status = "---";
+        if (g_env_state.mtf_macd_values[i].is_obi_gc) obi_macd_status = "GC↑";
+        else if (g_env_state.mtf_macd_values[i].is_obi_dc) obi_macd_status = "DC↓";
+        else if (g_env_state.mtf_macd_values[i].obi_macd > 0 && g_env_state.mtf_macd_values[i].obi_macd_slope > 0.001) obi_macd_status = "GC準備↑"; // 帯MACDが0より上で上昇中
+        else if (g_env_state.mtf_macd_values[i].obi_macd < 0 && g_env_state.mtf_macd_values[i].obi_macd_slope < -0.001) obi_macd_status = "DC準備↓"; // 帯MACDが0より下で下降中
+        else if (g_env_state.mtf_macd_values[i].obi_macd > 0) obi_macd_status = "0ライン上";
+        else if (g_env_state.mtf_macd_values[i].obi_macd < 0) obi_macd_status = "0ライン下";
+
+        DrawPanelLine(line++, "    └ 帯MACD: " + obi_macd_status, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    }
+
     DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    DrawPanelLine(line++, "■ スコアリング", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "  ├ 現在スコア (Buy) : " + (string)g_env_state.currentBuyScore, "", clrLime, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "  └ 現在スコア (Sell): " + (string)g_env_state.currentSellScore, "", clrTomato, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // D. その他の詳細シグナル (執行足のみ)
+    DrawPanelLine(line++, "■ シグナル詳細", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // ストキャスシグナルの表示 (CheckStochasticSignalから直接取得するのは難しいので、別途フラグ変数を用意する)
+    // DrawPanelLine(line++, "  ├ ストキャス: BUY", "", clrBlue, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // MACDダイバージェンスシグナルの表示 (CheckMACDDivergenceも同様にフラグ変数で連携)
+    // DrawPanelLine(line++, "  └ MACD Div: 強気 (MACD2)", "", clrDeepSkyBlue, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
     DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
+
+    // E. ポジションとリスク管理情報
+    DrawPanelLine(line++, "■ ポジション", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
     string buy_pos_text = "BUY : ---";
-    if(buyGroup.isActive) buy_pos_text = StringFormat("BUY (%d): %.2f Lot", buyGroup.positionCount, buyGroup.totalLotSize);
+    if(buyGroup.isActive) buy_pos_text = StringFormat("BUY (%d): %.2f Lot (Avg: %.5f)", buyGroup.positionCount, buyGroup.totalLotSize, buyGroup.averageEntryPrice);
     DrawPanelLine(line++, buy_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
+
     string sell_pos_text = "SELL: ---";
-    if(sellGroup.isActive) sell_pos_text = StringFormat("SELL(%d): %.2f Lot", sellGroup.positionCount, sellGroup.totalLotSize);
+    if(sellGroup.isActive) sell_pos_text = StringFormat("SELL(%d): %.2f Lot (Avg: %.5f)", sellGroup.positionCount, sellGroup.totalLotSize, sellGroup.averageEntryPrice);
     DrawPanelLine(line++, sell_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // BE/次の分割決済ライン情報
+    string buy_be_status = (buyGroup.isActive && buyGroup.splitsDone >= InpBreakEvenAfterSplits && InpBreakEvenAfterSplits > 0) ? "BE設定済" : "BE未設定";
+    string sell_be_status = (sellGroup.isActive && sellGroup.splitsDone >= InpBreakEvenAfterSplits && InpBreakEvenAfterSplits > 0) ? "BE設定済" : "BE未設定";
+    DrawPanelLine(line++, "  ├ BUY BE: " + buy_be_status, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    DrawPanelLine(line++, "  └ SELL BE: " + sell_be_status, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    string next_split_text_buy = "---";
+    if (buyGroup.isActive && buyGroup.splitsDone < buyGroup.lockedInSplitCount) {
+        if (ArraySize(buyGroup.splitPrices) > buyGroup.splitsDone) { // 配列境界チェック
+            next_split_text_buy = StringFormat("BUY #%d @%.5f", buyGroup.splitsDone + 1, buyGroup.splitPrices[buyGroup.splitsDone]);
+        }
+    }
+    DrawPanelLine(line++, "  ├ 次分割(買): " + next_split_text_buy, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    string next_split_text_sell = "---";
+    if (sellGroup.isActive && sellGroup.splitsDone < sellGroup.lockedInSplitCount) {
+        if (ArraySize(sellGroup.splitPrices) > sellGroup.splitsDone) { // 配列境界チェック
+            next_split_text_sell = StringFormat("SELL #%d @%.5f", sellGroup.splitsDone + 1, sellGroup.splitPrices[sellGroup.splitsDone]);
+        }
+    }
+    DrawPanelLine(line++, "  └ 次分割(売): " + next_split_text_sell, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    // 【重要】今回描画しなかった（つまり不要になった）パネルオブジェクトを削除します。
+    // これにより、オブジェクトが残り続けてチャートを汚すことを防ぎます。
+    // ObjectsDeleteAll(0, g_panelPrefix) を冒頭で行わない代わりに、ここで削除します。
+    int max_expected_lines = 50; // 想定されるパネルの最大行数（この数を超えたインデックスのオブジェクトを削除）
+    for(int i = line; i < max_expected_lines; i++) 
+    {
+        string text_obj_name = g_panelPrefix + "Text_" + (string)i;
+        string icon_obj_name = g_panelPrefix + "Icon_" + (string)i;
+        if(ObjectFind(0, text_obj_name) >= 0) ObjectDelete(0, text_obj_name);
+        if(ObjectFind(0, icon_obj_name) >= 0) ObjectDelete(0, icon_obj_name);
+    }
 }
 
 //+------------------------------------------------------------------+
-//| パネルの1行を描画するヘルパー関数
+//| パネルの1行を描画するヘルパー関数 (ちらつき対策版)
 //+------------------------------------------------------------------+
 void DrawPanelLine(int line_index, string text, string icon, color text_color, color icon_color, ENUM_BASE_CORNER corner, ENUM_ANCHOR_POINT anchor, int font_size, bool is_lower)
 {
     string panel_prefix = g_panelPrefix;
     int x_pos = p_panel_x_offset;
     int y_pos_start = p_panel_y_offset;
-    int y_step = (int)round(font_size * 1.5);
-    int icon_text_gap = 210; 
+    int y_step = (int)round(font_size * 1.5); // 行の高さ
+    int icon_text_gap = 210; // アイコンとテキストの間隔
     string font = "Arial";
     int y_pos;
 
-    if(is_lower) {
-        int total_lines = 14; 
-        y_pos = y_pos_start + ((total_lines - 1 - line_index) * y_step);
-    } else {
-        y_pos = y_pos_start + (line_index * y_step);
-    }
+    // Y座標の計算（下コーナーの場合は、描画が下から上へ積まれるように調整）
+    // ManageInfoPanel()で渡されるline_indexに基づいてy_posを計算します。
+    // `is_lower`がtrueの場合、パネル全体が下寄せになるため、行の積み重ねはY軸のマイナス方向へ。
+    // ここでの`estimated_total_lines`はManageInfoPanelの削除ロジックで使われるものと一致させる必要はありません。
+    // y_pos = y_pos_start + (line_index * y_step); // この行は変更なしで、ManageInfoPanelからのy_pos_startで調整されます。
+
+    // y_pos_startがパネル全体のYオフセット、line_indexが進むにつれて下へ描画。
+    // lowerの場合、パネル全体の高さから逆算して配置する必要があるが、ManageInfoPanelのy_pos_startはそのままオフセットなので、
+    // ここでの調整は直接影響しない。そのまま線形に配置する。
+    y_pos = y_pos_start + (line_index * y_step);
 
     string text_obj_name = panel_prefix + "Text_" + (string)line_index;
     string icon_obj_name = panel_prefix + "Icon_" + (string)line_index;
-    
+
+    // オブジェクトが存在しない場合は作成し、存在するならプロパティを更新
     if(ObjectFind(0, text_obj_name) < 0)
     {
         ObjectCreate(0, text_obj_name, OBJ_LABEL, 0, 0, 0);
         ObjectSetInteger(0, text_obj_name, OBJPROP_CORNER, corner);
         ObjectSetString(0, text_obj_name, OBJPROP_FONT, font);
+        ObjectSetInteger(0, text_obj_name, OBJPROP_ZORDER, 0); // 最前面に表示
     }
     if(ObjectFind(0, icon_obj_name) < 0)
     {
         ObjectCreate(0, icon_obj_name, OBJ_LABEL, 0, 0, 0);
         ObjectSetInteger(0, icon_obj_name, OBJPROP_CORNER, corner);
+        ObjectSetString(0, icon_obj_name, OBJPROP_FONT, font); // アイコンも同じフォントを使用
+        ObjectSetInteger(0, icon_obj_name, OBJPROP_ZORDER, 0); // 最前面に表示
     }
 
+    // オブジェクトのプロパティを常に更新
     ObjectSetInteger(0, text_obj_name, OBJPROP_ANCHOR, anchor);
     ObjectSetInteger(0, icon_obj_name, OBJPROP_ANCHOR, anchor);
     ObjectSetInteger(0, text_obj_name, OBJPROP_FONTSIZE, font_size);
@@ -2073,15 +2507,16 @@ void DrawPanelLine(int line_index, string text, string icon, color text_color, c
     ObjectSetInteger(0, text_obj_name, OBJPROP_COLOR, text_color);
     ObjectSetInteger(0, icon_obj_name, OBJPROP_COLOR, icon_color);
 
+    // x座標の調整 (右寄せ/左寄せ)
     if(anchor == ANCHOR_RIGHT)
     {
         ObjectSetInteger(0, icon_obj_name, OBJPROP_XDISTANCE, x_pos);
-        ObjectSetInteger(0, text_obj_name, OBJPROP_XDISTANCE, x_pos + 20);
+        ObjectSetInteger(0, text_obj_name, OBJPROP_XDISTANCE, x_pos + 20); // アイコンの右にテキスト
     }
-    else
+    else // ANCHOR_LEFT
     {
         ObjectSetInteger(0, text_obj_name, OBJPROP_XDISTANCE, x_pos);
-        ObjectSetInteger(0, icon_obj_name, OBJPROP_XDISTANCE, x_pos + icon_text_gap);
+        ObjectSetInteger(0, icon_obj_name, OBJPROP_XDISTANCE, x_pos + icon_text_gap); // テキストの右にアイコン
     }
 }
 
@@ -2597,7 +3032,7 @@ void ManageManualLines()
             ObjectSetString(0, name, OBJPROP_TEXT, text + "-Broken");
             ObjectSetInteger(0, name, OBJPROP_RAY_RIGHT, false);
 
-            if (InpEntryMode != HYBRID_MODE)
+            if (InpEntryMode != ZONE_MODE)
             {
                 int stateIndex = GetLineState(name);
                 if(stateIndex >= 0)
@@ -2944,7 +3379,7 @@ void UpdateZones()
 void ManageZoneVisuals()
 {
     ObjectsDeleteAll(0, "ZoneRect_");
-    if (!g_isZoneVisualizationEnabled || (InpEntryMode != ZONE_MODE && InpEntryMode != HYBRID_MODE)) return;
+    if (!g_isZoneVisualizationEnabled || (InpEntryMode != ZONE_MODE)) return;
 
     double zoneWidth = InpZonePips * g_pip;
     for (int i = 0; i < ArraySize(allLines); i++)

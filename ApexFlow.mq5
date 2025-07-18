@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "7.1"
-#property description "Ver7.1: MTFサブステート修正　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
+#property version   "7.11"
+#property description "Ver7.11: MTF値パラメータ追加　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
 
 //+------------------------------------------------------------------+
 //|                            定数定義                              |
@@ -256,10 +256,27 @@ input int    InpSlopeLookback   = 1;     // 傾き計算のルックバック期
 input int    InpSlopeAtrPeriod  = 14;    // 傾き正規化のためのATR期間(p)
 
 input group "=== MTF分析 設定 ===";
-input ENUM_TIMEFRAMES InpIntermediateTimeframe = PERIOD_H4; // 中間時間足の選択 (例: H4 = 4時間足)
 input ENUM_TIMEFRAMES InpHigherTimeframe       = PERIOD_D1; // 上位時間足の選択 (例: D1 = 日足)
+input ENUM_TIMEFRAMES InpIntermediateTimeframe = PERIOD_H4; // 中間時間足の選択 (例: H4 = 4時間足)
 input int             InpScorePerSymbol      = 20;        // スコアバーの1●あたりの点数 (情報パネル用)
 
+input group "=== MTF スコアリング & バイアス設定 ===";
+input int    InpWeightCurrentTF      = 10;  // 執行時間足のスコア重み付け
+input int    InpWeightIntermediateTF = 15;  // 中間時間足のスコア重み付け
+input int    InpWeightHigherTF       = 20;  // 上位時間足のスコア重み付け
+input int    InpScore_State_Confirmed  = 10;  // [スコア] 状態: 本物 (1-B, 4-B)
+input int    InpScore_State_Rejection  = 9;   // [スコア] 状態: 失敗/拒絶 (3-Rej, 6-Rej)
+input int    InpScore_State_Nascent    = 7;   // [スコア] 状態: 予兆 (1-A, 4-A)
+input int    InpScore_State_Pullback   = 6;   // [スコア] 状態: 押し目/戻り (2-Pull, 5-Rally)
+input int    InpScore_State_Transition = 5;   // [スコア] 状態: 移行中 (6-TransUp, 3-TransDown)
+input int    InpScore_State_Mature     = 3;   // [スコア] 状態: 成熟 (1-C, 4-C)
+input int    InpScore_Slope_Long_Strong= 4;   // [スコア] 長期MA傾き: 強い
+input int    InpScore_Slope_Long_Weak  = 2;   // [スコア] 長期MA傾き: 弱い
+input int    InpScore_Slope_Short    = 2;   // [スコア] 短期MA傾き (執行足のみ)
+input int    InpScore_MACD_Cross     = 5;   // [スコア] 帯MACDクロス (GC/DC)
+input int    InpScore_MACD_Momentum  = 3;   // [スコア] 帯MACDモメンタム (0ラインとの位置と傾き)
+input int    InpBias_ScoreDiff_Dominant= 30;  // [バイアス] 優位性と判断するスコア差
+input int    InpBias_Score_Range     = 20;  // [バイアス] レンジと判断するスコア閾値
 input group "=== ストキャス設定 ===";
 input int  InpStoch_K_Period    = 26; // %K期間
 input int  InpStoch_D_Period    = 3;  // %D期間
@@ -423,7 +440,6 @@ void OnChartEvent(const int id, const long &lparam, const double &dparam, const 
 
 // --- 分析エンジン & ロジック関数 ---
 void UpdateEnvironmentAnalysis();
-void UpdateScoresBasedOnState();
 void CheckStateBasedExits();
 void CheckEntry();
 void PlaceOrder(bool isBuy, double price, int score);
@@ -893,7 +909,7 @@ void UpdateEnvironmentAnalysis()
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】総合優位性スコアと取引バイアスを計算する
+//| 【FSM修正版】総合優位性スコアと取引バイアスを計算する (コンパイルエラー修正版)
 //+------------------------------------------------------------------+
 void CalculateOverallBiasAndScore()
 {
@@ -902,106 +918,78 @@ void CalculateOverallBiasAndScore()
     g_env_state.current_trade_bias = BIAS_NONE;
     g_env_state.current_bias_phase = PHASE_NONE;
 
-    // MTF時間足のリスト (定義済み定数を使用)
-    ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
-    mtf_periods[TF_CURRENT_INDEX]      = _Period;
-    mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe;
-    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;
-
-    // 各時間足のスコアリング係数 (重要度に合わせて調整可能)
-    int current_tf_weight = 10; // 執行足の重要度
-    int intermediate_tf_weight = 15; // 中間時間足の重要度
-    int higher_tf_weight = 20; // 上位時間足の重要度
-    
+    // 各時間足のスコアリング係数 (入力パラメータから取得)
     int weights[ENUM_TIMEFRAMES_COUNT];
-    weights[TF_CURRENT_INDEX]      = current_tf_weight;
-    weights[TF_INTERMEDIATE_INDEX] = intermediate_tf_weight;
-    weights[TF_HIGHER_INDEX]       = higher_tf_weight;
-
-
+    weights[TF_CURRENT_INDEX]      = InpWeightCurrentTF;
+    weights[TF_INTERMEDIATE_INDEX] = InpWeightIntermediateTF;
+    weights[TF_HIGHER_INDEX]       = InpWeightHigherTF;
+    
     // --- 1. 各時間足のステージと傾きに基づいたスコアリング ---
     for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
     {
         ENUM_MASTER_STATE master_state = g_env_state.mtf_master_state[i];
         ENUM_SLOPE_STATE long_slope = g_env_state.mtf_slope_long[i];
         ENUM_SLOPE_STATE short_slope = g_env_state.mtf_slope_short[i];
+        // ---【修正点①】'&' を削除し、通常の変数として値をコピー ---
         DaijunkanMACDValues macd = g_env_state.mtf_macd_values[i];
         int weight = weights[i];
 
         // ステージに基づくスコア
         switch(master_state)
         {
-            case STATE_1B_CONFIRMED: g_env_state.total_buy_score += (10 * weight / 10); break; // 高スコア
-            case STATE_1A_NASCENT:   g_env_state.total_buy_score += (7 * weight / 10);  break;
-            case STATE_2_PULLBACK:   g_env_state.total_buy_score += (6 * weight / 10);  break;
-            case STATE_6_TRANSITION_UP: g_env_state.total_buy_score += (5 * weight / 10); break;
-            case STATE_3_REJECTION:  g_env_state.total_buy_score += (9 * weight / 10);  break; // 下降失敗は買い根拠
+            // --- 買いサイドのスコア ---
+            case STATE_1B_CONFIRMED: g_env_state.total_buy_score += (InpScore_State_Confirmed * weight / 10); break;
+            case STATE_3_REJECTION:  g_env_state.total_buy_score += (InpScore_State_Rejection * weight / 10); break;
+            case STATE_1A_NASCENT:   g_env_state.total_buy_score += (InpScore_State_Nascent * weight / 10); break;
+            case STATE_2_PULLBACK:   g_env_state.total_buy_score += (InpScore_State_Pullback * weight / 10);  break;
+            case STATE_6_TRANSITION_UP: g_env_state.total_buy_score += (InpScore_State_Transition * weight / 10); break;
+            case STATE_1C_MATURE:    g_env_state.total_buy_score += (InpScore_State_Mature * weight / 10); break;
 
-            case STATE_4B_CONFIRMED: g_env_state.total_sell_score += (10 * weight / 10); break; // 高スコア
-            case STATE_4A_NASCENT:   g_env_state.total_sell_score += (7 * weight / 10);  break;
-            case STATE_5_RALLY:      g_env_state.total_sell_score += (6 * weight / 10);  break;
-            case STATE_3_TRANSITION_DOWN: g_env_state.total_sell_score += (5 * weight / 10); break;
-            case STATE_6_REJECTION:  g_env_state.total_sell_score += (9 * weight / 10);  break; // 上昇失敗は売り根拠
-            
-            case STATE_1C_MATURE:    g_env_state.total_buy_score += (3 * weight / 10); break; // トレンド減速だがまだ上
-            case STATE_4C_MATURE:    g_env_state.total_sell_score += (3 * weight / 10); break; // トレンド減速だがまだ下
-            // Stage 2_REVERSAL_WARN や 5_REVERSAL_WARN は後で決済判断などで利用。直接スコアに加算しない。
+            // --- 売りサイドのスコア ---
+            case STATE_4B_CONFIRMED: g_env_state.total_sell_score += (InpScore_State_Confirmed * weight / 10); break;
+            case STATE_6_REJECTION:  g_env_state.total_sell_score += (InpScore_State_Rejection * weight / 10); break;
+            case STATE_4A_NASCENT:   g_env_state.total_sell_score += (InpScore_State_Nascent * weight / 10); break;
+            case STATE_5_RALLY:      g_env_state.total_sell_score += (InpScore_State_Pullback * weight / 10);  break;
+            case STATE_3_TRANSITION_DOWN: g_env_state.total_sell_score += (InpScore_State_Transition * weight / 10); break;
+            case STATE_4C_MATURE:    g_env_state.total_sell_score += (InpScore_State_Mature * weight / 10); break;
         }
 
         // 長期MAの傾きに基づくスコア
-        if (long_slope == SLOPE_UP_STRONG) g_env_state.total_buy_score += (4 * weight / 10);
-        if (long_slope == SLOPE_UP_WEAK)   g_env_state.total_buy_score += (2 * weight / 10);
-        if (long_slope == SLOPE_DOWN_STRONG) g_env_state.total_sell_score += (4 * weight / 10);
-        if (long_slope == SLOPE_DOWN_WEAK)   g_env_state.total_sell_score += (2 * weight / 10);
-        
-        // 中期MAの傾きに基づくスコア (執行足に近い時間足で重み付けを強くしても良い)
-        if (short_slope == SLOPE_UP_STRONG && i == TF_CURRENT_INDEX) g_env_state.total_buy_score += (2 * weight / 10);
-        if (short_slope == SLOPE_DOWN_STRONG && i == TF_CURRENT_INDEX) g_env_state.total_sell_score += (2 * weight / 10);
+        if (long_slope == SLOPE_UP_STRONG) g_env_state.total_buy_score += (InpScore_Slope_Long_Strong * weight / 10);
+        if (long_slope == SLOPE_UP_WEAK)   g_env_state.total_buy_score += (InpScore_Slope_Long_Weak * weight / 10);
+        if (long_slope == SLOPE_DOWN_STRONG) g_env_state.total_sell_score += (InpScore_Slope_Long_Strong * weight / 10);
+        if (long_slope == SLOPE_DOWN_WEAK)   g_env_state.total_sell_score += (InpScore_Slope_Long_Weak * weight / 10);
 
-        // 大循環MACDに基づくスコア (各時間足共通)
-        if (macd.is_obi_gc) g_env_state.total_buy_score += (5 * weight / 10);
-        if (macd.is_obi_dc) g_env_state.total_sell_score += (5 * weight / 10);
-        if (macd.obi_macd > 0 && macd.obi_macd_slope > 0) g_env_state.total_buy_score += (3 * weight / 10); // 帯MACDが0より上で上昇中
-        if (macd.obi_macd < 0 && macd.obi_macd_slope < 0) g_env_state.total_sell_score += (3 * weight / 10); // 帯MACDが0より下で下降中
+        // 短期MAの傾きに基づくスコア (執行足のみ)
+        if (i == TF_CURRENT_INDEX)
+        {
+            if (short_slope == SLOPE_UP_STRONG) g_env_state.total_buy_score += (InpScore_Slope_Short * weight / 10);
+            if (short_slope == SLOPE_DOWN_STRONG) g_env_state.total_sell_score += (InpScore_Slope_Short * weight / 10);
+        }
 
-        // MACDダイバージェンス（執行足のみで評価するのが一般的だが、必要ならMTFにも拡張）
-        // ここでは便宜上、CheckMACDDivergence()がシグナルを生成すると仮定し、スコア加算は別の方法で行うか、
-        // この関数内でMACDハンドルを渡して直接評価する。
-        // 現時点ではCheckMACDDivergenceはシグナル描画のみなので、ここでは直接スコアに反映しない。
+        // 大循環MACDに基づくスコア
+        if (macd.is_obi_gc) g_env_state.total_buy_score += (InpScore_MACD_Cross * weight / 10);
+        if (macd.is_obi_dc) g_env_state.total_sell_score += (InpScore_MACD_Cross * weight / 10);
+        if (macd.obi_macd > 0 && macd.obi_macd_slope > 0) g_env_state.total_buy_score += (InpScore_MACD_Momentum * weight / 10);
+        if (macd.obi_macd < 0 && macd.obi_macd_slope < 0) g_env_state.total_sell_score += (InpScore_MACD_Momentum * weight / 10);
     }
-
-    // --- 2. サポート/レジスタンスとの関係に基づくスコアリング (執行足のみ) ---
-    // ProcessLineSignals() や CheckStochasticSignal() がシグナルオブジェクトを生成した際に、
-    // そのシグナルの種類に応じて別途スコアを加算するロジックを検討する。
-    // 例: シグナルオブジェクトの生成時に g_env_state.total_buy_score/total_sell_score を直接加算
-
-    // --- 3. その他のインジケーターシグナル (執行足のみ) ---
-    // ストキャスティクスなど、既存の CheckStochasticSignal() がシグナルを生成した際に、
-    // そのシグナルの種類に応じて別途スコアを加算するロジックを検討する。
-    // 例: CreateSignalObject() を呼び出す際にスコア引数を追加し、PlaceOrder() に渡すなど。
-
+    
     // --- 4. 総合スコアに基づいた取引バイアスと段階の決定 ---
-    // ここに、これまでの考察に基づいた複雑な判定ロジックを実装します。
-    // スコアの閾値はパラメータ化を推奨しますが、ここでは固定値で例示。
-    int buy_dominant_threshold = 30; // 買い優位と判断する最低スコア差
-    int sell_dominant_threshold = 30; // 売り優位と判断する最低スコア差
-    int range_threshold = 20; // 売り買いスコアがこの差以内ならレンジと判断する閾値
-
     // コアトレンド判定
     if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1B_CONFIRMED &&
         g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_1B_CONFIRMED &&
-        g_env_state.total_buy_score > g_env_state.total_sell_score + buy_dominant_threshold)
+        g_env_state.total_buy_score > (g_env_state.total_sell_score + InpBias_ScoreDiff_Dominant)) //【修正点②】括弧を追加
     {
         g_env_state.current_trade_bias = BIAS_CORE_TREND_BUY;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING; // 全て本物なら進行中
+        g_env_state.current_bias_phase = PHASE_PROGRESSING;
         if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1A_NASCENT || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_TRANSITION_UP)
-            g_env_state.current_bias_phase = PHASE_INITIATING; // 執行足が初期段階なら全体も初期
+            g_env_state.current_bias_phase = PHASE_INITIATING;
         else if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1C_MATURE)
-            g_env_state.current_bias_phase = PHASE_MATURING; // 執行足が成熟なら全体も成熟
+            g_env_state.current_bias_phase = PHASE_MATURING;
     }
     else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4B_CONFIRMED &&
              g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.total_sell_score > g_env_state.total_buy_score + sell_dominant_threshold)
+             g_env_state.total_sell_score > (g_env_state.total_buy_score + InpBias_ScoreDiff_Dominant)) //【修正点②】括弧を追加
     {
         g_env_state.current_trade_bias = BIAS_CORE_TREND_SELL;
         g_env_state.current_bias_phase = PHASE_PROGRESSING;
@@ -1013,18 +1001,16 @@ void CalculateOverallBiasAndScore()
     // プルバック判定
     else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1B_CONFIRMED &&
              g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_2_PULLBACK &&
-             g_env_state.mtf_slope_long[TF_HIGHER_INDEX] == SLOPE_UP_STRONG &&
-             g_env_state.total_buy_score > g_env_state.total_sell_score) // 買いスコアが優勢なら
+             g_env_state.total_buy_score > g_env_state.total_sell_score)
     {
         g_env_state.current_trade_bias = BIAS_PULLBACK_BUY;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING; // 調整中
+        g_env_state.current_bias_phase = PHASE_PROGRESSING;
         if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_TRANSITION_UP || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1A_NASCENT)
-            g_env_state.current_bias_phase = PHASE_MATURING; // 執行足が反転開始ならプルバック終焉
+            g_env_state.current_bias_phase = PHASE_MATURING;
     }
     else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4B_CONFIRMED &&
              g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_5_RALLY &&
-             g_env_state.mtf_slope_long[TF_HIGHER_INDEX] == SLOPE_DOWN_STRONG &&
-             g_env_state.total_sell_score > g_env_state.total_buy_score) // 売りスコアが優勢なら
+             g_env_state.total_sell_score > g_env_state.total_buy_score)
     {
         g_env_state.current_trade_bias = BIAS_PULLBACK_SELL;
         g_env_state.current_bias_phase = PHASE_PROGRESSING;
@@ -1035,65 +1021,31 @@ void CalculateOverallBiasAndScore()
     else if ((g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_6_TRANSITION_UP || g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1A_NASCENT) &&
              g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_1B_CONFIRMED &&
              g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1B_CONFIRMED &&
-             g_env_state.total_buy_score > g_env_state.total_sell_score + buy_dominant_threshold * 0.5) // スコア差は小さめでもOK
+             g_env_state.total_buy_score > (g_env_state.total_sell_score + (InpBias_ScoreDiff_Dominant / 2))) //【修正点②】括弧を追加
     {
         g_env_state.current_trade_bias = BIAS_EARLY_ENTRY_BUY;
-        g_env_state.current_bias_phase = PHASE_INITIATING; // 上位足が初期段階なので
+        g_env_state.current_bias_phase = PHASE_INITIATING;
     }
     else if ((g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_3_TRANSITION_DOWN || g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4A_NASCENT) &&
              g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_4B_CONFIRMED &&
              g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.total_sell_score > g_env_state.total_buy_score + sell_dominant_threshold * 0.5)
+             g_env_state.total_sell_score > (g_env_state.total_buy_score + (InpBias_ScoreDiff_Dominant / 2))) //【修正点②】括弧を追加
     {
         g_env_state.current_trade_bias = BIAS_EARLY_ENTRY_SELL;
         g_env_state.current_bias_phase = PHASE_INITIATING;
     }
     // レンジトレード / 待機判定
-    else if (g_env_state.total_buy_score < range_threshold || g_env_state.total_sell_score < range_threshold || // どちらのスコアも低い
-             MathAbs(g_env_state.total_buy_score - g_env_state.total_sell_score) < range_threshold * 0.5) // スコアが拮抗
+    else if (g_env_state.total_buy_score < InpBias_Score_Range || g_env_state.total_sell_score < InpBias_Score_Range ||
+             MathAbs(g_env_state.total_buy_score - g_env_state.total_sell_score) < (InpBias_Score_Range / 2))
     {
         g_env_state.current_trade_bias = BIAS_RANGE_TRADE;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING; // 膠着状態
+        g_env_state.current_bias_phase = PHASE_PROGRESSING;
         
-        // レンジ後期 (ブレイクアウト準備期) の判定は、MACDやMAの収束/拡散の兆候などを追加で考慮
-        if ((g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope > 0.01 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd > g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal) ||
-            (g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope < -0.01 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd < g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal) )
+        if (g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope > 0 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd > g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal ||
+            g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope < 0 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd < g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal)
         {
-            g_env_state.current_bias_phase = PHASE_MATURING; // ブレイクアウト準備
+            g_env_state.current_bias_phase = PHASE_MATURING;
         }
-    }
-    else
-    {
-        // どの明確なバイアスにも当てはまらない場合
-        g_env_state.current_trade_bias = BIAS_NONE;
-        g_env_state.current_bias_phase = PHASE_NONE;
-    }
-}
-
-//+------------------------------------------------------------------+
-//| 【新設】状態に基づいてスコアを更新する
-//+------------------------------------------------------------------+
-void UpdateScoresBasedOnState()
-{
-    g_env_state.currentBuyScore = 0;
-    g_env_state.currentSellScore = 0;
-    int score = 0;
-
-    switch(g_env_state.master_state)
-    {
-        case STATE_1B_CONFIRMED:      score = 10; g_env_state.currentBuyScore = score; break;
-        case STATE_2_PULLBACK:        score = 8;  g_env_state.currentBuyScore = score; break;
-        case STATE_3_REJECTION:       score = 9;  g_env_state.currentBuyScore = score; break;
-        case STATE_1A_NASCENT:        score = 6;  g_env_state.currentBuyScore = score; break;
-        case STATE_5_REVERSAL_WARN:   score = 5;  g_env_state.currentBuyScore = score; break;
-        case STATE_6_TRANSITION_UP:   score = 5;  g_env_state.currentBuyScore = score; break;
-        case STATE_4B_CONFIRMED:      score = 10; g_env_state.currentSellScore = score; break;
-        case STATE_5_RALLY:           score = 8;  g_env_state.currentSellScore = score; break;
-        case STATE_6_REJECTION:       score = 9;  g_env_state.currentSellScore = score; break;
-        case STATE_4A_NASCENT:        score = 6;  g_env_state.currentSellScore = score; break;
-        case STATE_2_REVERSAL_WARN:   score = 5;  g_env_state.currentSellScore = score; break;
-        case STATE_3_TRANSITION_DOWN: score = 5;  g_env_state.currentSellScore = score; break;
-        default: break;
     }
 }
 
@@ -1683,7 +1635,7 @@ void CheckStochasticSignal()
 }
 
 //+------------------------------------------------------------------+
-//| ゾーン内でのMACDクロスエントリーをチェックする
+//| ゾーン内でのMACDクロスエントリーをチェックする (警告修正版)
 //+------------------------------------------------------------------+
 void CheckZoneMacdCross()
 {
@@ -1692,9 +1644,12 @@ void CheckZoneMacdCross()
     if (TimeCurrent() < lastZoneCrossEntryTime + PeriodSeconds()) return;
 
     double exec_main[3], exec_signal[3];
-    ArraySetAsSeries(exec_main, true); ArraySetAsSeries(exec_signal, true);
+    // ---【修正点】以下の行を削除 ---
+    // ArraySetAsSeries(exec_main, true); ArraySetAsSeries(exec_signal, true); // 不要なため削除
+    
     if (CopyBuffer(h_macd_exec, 0, 0, 3, exec_main) < 3 || CopyBuffer(h_macd_exec, 1, 0, 3, exec_signal) < 3) return;
 
+    // このロジックは「2本前の足と1本前の足の間でクロスが完了したか」をチェックしています
     bool isBuyCross = (exec_main[2] < exec_signal[2] && exec_main[1] > exec_signal[1]);
     bool isSellCross = (exec_main[2] > exec_signal[2] && exec_main[1] < exec_signal[1]);
     if (!isBuyCross && !isSellCross) return;
@@ -1711,18 +1666,20 @@ void CheckZoneMacdCross()
 
         if (isBuyCross && line.type == LINE_TYPE_SUPPORT && tick.ask > lower_zone && tick.ask < upper_zone)
         {
-            if (g_env_state.currentBuyScore >= InpEntryScore)
+            // エントリー判断はMTF総合スコアを利用するよう修正
+            if (g_env_state.total_buy_score >= InpEntryScore)
             {
-                PlaceOrder(true, tick.ask, g_env_state.currentBuyScore);
+                PlaceOrder(true, tick.ask, g_env_state.total_buy_score);
                 lastZoneCrossEntryTime = TimeCurrent();
                 return;
             }
         }
         if (isSellCross && line.type == LINE_TYPE_RESISTANCE && tick.bid > lower_zone && tick.bid < upper_zone)
         {
-            if (g_env_state.currentSellScore >= InpEntryScore)
+            // エントリー判断はMTF総合スコアを利用するよう修正
+            if (g_env_state.total_sell_score >= InpEntryScore)
             {
-                PlaceOrder(false, tick.bid, g_env_state.currentSellScore);
+                PlaceOrder(false, tick.bid, g_env_state.total_sell_score);
                 lastZoneCrossEntryTime = TimeCurrent();
                 return;
             }

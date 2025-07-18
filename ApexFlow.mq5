@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "7.0"
-#property description "Ver7.0: MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
+#property version   "7.1"
+#property description "Ver7.1: MTFサブステート修正　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
 
 //+------------------------------------------------------------------+
 //|                            定数定義                              |
@@ -432,6 +432,7 @@ void CalculateOverallBiasAndScore(); // 【新規】この行を追加
 // --- 分析ヘルパー関数 ---
 bool InitSlopeAtr();
 ENUM_SLOPE_STATE GetSlopeState(int ma_handle, int lookback);
+ENUM_MASTER_STATE GetMasterState(int primary_stage, int prev_primary_stage, ENUM_SLOPE_STATE slope_long, ENUM_SLOPE_STATE slope_short, const DaijunkanMACDValues &macd_values);
 DaijunkanMACDValues CalculateDaijunkanMACD();
 int GetPrimaryStage(int shift);
 string MasterStateToString(ENUM_MASTER_STATE state, color &out_color);
@@ -847,27 +848,37 @@ void UpdateEnvironmentAnalysis()
     ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
     mtf_periods[TF_CURRENT_INDEX]      = _Period; // 執行足
     mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe; // 中間時間足
-    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;       // 上位時間足
+    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe; // 上位時間足
 
     // 各時間足の分析データを収集
     for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
     {
         ENUM_TIMEFRAMES current_tf = mtf_periods[i];
-
-        // 各時間足の移動平均線の傾きを計算
+        
+        // ---【変更点】ここからサブステート判定ロジック ---
+        // (1) 伝統的なステージを現在足と1本前で取得
+        int current_primary_stage = GetPrimaryStage(0, current_tf, h_gc_ma_short_mtf[i], h_gc_ma_middle_mtf[i], h_gc_ma_long_mtf[i]);
+        int prev_primary_stage    = GetPrimaryStage(1, current_tf, h_gc_ma_short_mtf[i], h_gc_ma_middle_mtf[i], h_gc_ma_long_mtf[i]);
+        
+        // (2) 各時間足の傾きと大循環MACDを計算
         g_env_state.mtf_slope_short[i]  = GetSlopeState(h_gc_ma_short_mtf[i], InpSlopeLookback, current_tf);
         g_env_state.mtf_slope_middle[i] = GetSlopeState(h_gc_ma_middle_mtf[i], InpSlopeLookback, current_tf);
         g_env_state.mtf_slope_long[i]   = GetSlopeState(h_gc_ma_long_mtf[i], InpSlopeLookback, current_tf);
-        
-        // 各時間足の大循環MACDを計算
         g_env_state.mtf_macd_values[i] = CalculateDaijunkanMACD(current_tf, h_gc_ma_short_mtf[i], h_gc_ma_middle_mtf[i], h_gc_ma_long_mtf[i]);
         
-        // 各時間足の伝統的ステージを計算（まだサブステートへの変換はしない）
-        g_env_state.mtf_master_state[i] = GetPrimaryStage(0, current_tf, h_gc_ma_short_mtf[i], h_gc_ma_middle_mtf[i], h_gc_ma_long_mtf[i]);
+        // (3) 新しいGetMasterState関数を呼び出して、正しいサブステートを格納
+        g_env_state.mtf_master_state[i] = GetMasterState(
+            current_primary_stage,
+            prev_primary_stage,
+            g_env_state.mtf_slope_long[i],
+            g_env_state.mtf_slope_short[i],
+            g_env_state.mtf_macd_values[i]
+        );
+        // ---【変更点】ここまで ---
     }
 
     // --- 2. 執行足の情報をg_env_stateの単一変数にもコピー（パネル表示などの互換性のため） ---
-    g_env_state.master_state = g_env_state.mtf_master_state[TF_CURRENT_INDEX]; // ここはまだプライマリーステージが入る
+    g_env_state.master_state = g_env_state.mtf_master_state[TF_CURRENT_INDEX];
     g_env_state.primary_stage = GetPrimaryStage(0, _Period, h_gc_ma_short_mtf[TF_CURRENT_INDEX], h_gc_ma_middle_mtf[TF_CURRENT_INDEX], h_gc_ma_long_mtf[TF_CURRENT_INDEX]);
     g_env_state.prev_primary_stage = GetPrimaryStage(1, _Period, h_gc_ma_short_mtf[TF_CURRENT_INDEX], h_gc_ma_middle_mtf[TF_CURRENT_INDEX], h_gc_ma_long_mtf[TF_CURRENT_INDEX]);
     g_env_state.slope_short  = g_env_state.mtf_slope_short[TF_CURRENT_INDEX];
@@ -876,12 +887,9 @@ void UpdateEnvironmentAnalysis()
     g_env_state.macd_values  = g_env_state.mtf_macd_values[TF_CURRENT_INDEX];
 
     // --- 3. 総合スコアと取引バイアスを決定する新しい関数を呼び出す ---
-    // この関数はまだ実装されていませんが、次のステップで作成します。
     CalculateOverallBiasAndScore();
-
-    // 旧スコア更新は新しいスコアリングに置き換えられるため、この関数呼び出しは不要になるか、
-    // CalculateOverallBiasAndScore()内に統合されます。
-    // UpdateScoresBasedOnState(); // この行は後で削除またはコメントアウト
+    
+    // UpdateScoresBasedOnState(); // この行は古いロジックのため不要
 }
 
 //+------------------------------------------------------------------+
@@ -1373,6 +1381,61 @@ ENUM_SLOPE_STATE GetSlopeState(int ma_handle, int lookback, ENUM_TIMEFRAMES tf_p
     if (normalized_slope < InpSlopeDownWeak)    return SLOPE_DOWN_WEAK;
 
     return SLOPE_FLAT;
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】仕様書に基づき、詳細なマスター状態（サブステート）を判定する
+//+------------------------------------------------------------------+
+ENUM_MASTER_STATE GetMasterState(
+    int primary_stage, 
+    int prev_primary_stage, 
+    ENUM_SLOPE_STATE slope_long, 
+    ENUM_SLOPE_STATE slope_short, 
+    const DaijunkanMACDValues &macd_values
+)
+{
+    // 仕様書(3.1, 3.3)に基づき、トレンドの成熟度を判定
+    if (primary_stage == 1 && slope_short <= SLOPE_FLAT) return STATE_1C_MATURE;
+    if (primary_stage == 4 && slope_short >= SLOPE_FLAT) return STATE_4C_MATURE;
+
+    // 仕様書(4.2, 4.3)に基づき、ステージ移行の成否を判定
+    switch(primary_stage)
+    {
+        // --- ステージ 1, 4 (パーフェクトオーダー) ---
+        case 1:
+            // 仕様書(3.1): 長期MAの傾きで「本物」か「予兆」かを判断
+            if (slope_long >= SLOPE_UP_WEAK) return STATE_1B_CONFIRMED;   // 本物
+            else return STATE_1A_NASCENT;                                // 予兆
+            
+        case 4:
+            // 仕様書(3.3): 長期MAの傾きで「本物」か「予兆」かを判断
+            if (slope_long <= SLOPE_DOWN_WEAK) return STATE_4B_CONFIRMED; // 本物
+            else return STATE_4A_NASCENT;                                // 予兆
+
+        // --- ステージ 2, 5 (調整局面) ---
+        case 2:
+            // 仕様書(3.2): 長期MAの傾きが強ければ「押し目」、弱まっていれば「転換警告」
+            if (slope_long >= SLOPE_UP_STRONG) return STATE_2_PULLBACK;      // シナリオA: 押し目買い
+            else return STATE_2_REVERSAL_WARN;                               // シナリオB: トレンド転換警告
+            
+        case 5:
+            // 仕様書(3.4): 長期MAの傾きが強ければ「戻り」、弱まっていれば「転換警告」
+            if (slope_long <= SLOPE_DOWN_STRONG) return STATE_5_RALLY;       // シナリオA: 戻り売り
+            else return STATE_5_REVERSAL_WARN;                               // シナリオB: トレンド転換警告
+
+        // --- ステージ 3, 6 (反転開始) ---
+        case 3:
+            // 仕様書(4.3): 前ステージが2で、長期MAがまだ上向きなら「下降失敗」
+            if (prev_primary_stage == 2 && slope_long >= SLOPE_FLAT) return STATE_3_REJECTION; // 低確率シナリオ(逆行): シェイクアウト
+            else return STATE_3_TRANSITION_DOWN;                                              // 高確率シナリオ(順行): 下降へ移行
+
+        case 6:
+            // 仕様書(4.2): 前ステージが5で、長期MAがまだ下向きなら「上昇失敗」
+            if (prev_primary_stage == 5 && slope_long <= SLOPE_FLAT) return STATE_6_REJECTION; // 低確率シナリオ(逆行): 上昇拒否
+            else return STATE_6_TRANSITION_UP;                                                // 高確率シナリオ(順行): 上昇へ移行
+    }
+
+    return STATE_UNKNOWN; // 不明な状態
 }
 
 //+------------------------------------------------------------------+
@@ -2453,7 +2516,7 @@ void ManageInfoPanel()
 }
 
 //+------------------------------------------------------------------+
-//| パネルの1行を描画するヘルパー関数 (ちらつき対策版)
+//| パネルの1行を描画するヘルパー関数 (ちらつき対策 & 下コーナー反転解消版)
 //+------------------------------------------------------------------+
 void DrawPanelLine(int line_index, string text, string icon, color text_color, color icon_color, ENUM_BASE_CORNER corner, ENUM_ANCHOR_POINT anchor, int font_size, bool is_lower)
 {
@@ -2465,16 +2528,21 @@ void DrawPanelLine(int line_index, string text, string icon, color text_color, c
     string font = "Arial";
     int y_pos;
 
-    // Y座標の計算（下コーナーの場合は、描画が下から上へ積まれるように調整）
-    // ManageInfoPanel()で渡されるline_indexに基づいてy_posを計算します。
-    // `is_lower`がtrueの場合、パネル全体が下寄せになるため、行の積み重ねはY軸のマイナス方向へ。
-    // ここでの`estimated_total_lines`はManageInfoPanelの削除ロジックで使われるものと一致させる必要はありません。
-    // y_pos = y_pos_start + (line_index * y_step); // この行は変更なしで、ManageInfoPanelからのy_pos_startで調整されます。
-
-    // y_pos_startがパネル全体のYオフセット、line_indexが進むにつれて下へ描画。
-    // lowerの場合、パネル全体の高さから逆算して配置する必要があるが、ManageInfoPanelのy_pos_startはそのままオフセットなので、
-    // ここでの調整は直接影響しない。そのまま線形に配置する。
-    y_pos = y_pos_start + (line_index * y_step);
+    // Y座標の計算ロジックを修正
+    if(is_lower) {
+        // 下部コーナーの場合、行が下から上へ積み上がるようにY座標を計算
+        // DrawPanelLine()がManageInfoPanel()から呼び出されるline_indexをそのまま使用し、
+        // パネルのY位置は下から上に増えるようにする。
+        // estimated_total_lines は ManageInfoPanel() の最後に定義された
+        // max_expected_lines の値を参照するか、固定値とする。
+        // ここでは、ManageInfoPanel() が約20行の情報を描画すると仮定して、
+        // 常に最大行数から逆算して配置するように調整します。
+        int estimated_max_lines = 22; // ManageInfoPanelで描画される可能性のある最大行数に合わせる
+        y_pos = y_pos_start + ((estimated_max_lines - 1 - line_index) * y_step);
+    } else {
+        // 上部コーナーの場合、上から下へ描画される
+        y_pos = y_pos_start + (line_index * y_step);
+    }
 
     string text_obj_name = panel_prefix + "Text_" + (string)line_index;
     string icon_obj_name = panel_prefix + "Icon_" + (string)line_index;

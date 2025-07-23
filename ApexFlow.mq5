@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "7.3"
-#property description "Ver7.3: RSI,SLバッファ等実装　HTインジ対応　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
+#property version   "7.51"
+#property description "Ver7.51: バイアス新定義、TP至近スキップ HTインジ対応　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
 
 //+------------------------------------------------------------------+
 //|                            定数定義                              |
@@ -111,17 +111,33 @@ enum ENUM_PANEL_CORNER
     PC_RIGHT_LOWER      // 右下
 };
 
-// --- 新規: 取引バイアスの定義 ---
+// 新しい取引バイアスの定義 (市場サイクルモデル)
 enum ENUM_TRADE_BIAS
 {
-    BIAS_NONE,              // バイアスなし / 不明確
-    BIAS_CORE_TREND_BUY,    // コアトレンド (買い)
-    BIAS_CORE_TREND_SELL,   // コアトレンド (売り)
-    BIAS_PULLBACK_BUY,      // プルバック (買い / 押し目)
-    BIAS_PULLBACK_SELL,     // プルバック (売り / 戻り)
-    BIAS_EARLY_ENTRY_BUY,   // アーリーエントリー (買い)
-    BIAS_EARLY_ENTRY_SELL,  // アーリーエントリー (売り)
-    BIAS_RANGE_TRADE        // レンジトレード / 膠着
+    // --- Neutral States (中立状態) ---
+    BIAS_UNCLEAR,                           // 不明確
+    BIAS_RANGE_BOUND,                       // レンジ・方向感なし
+    BIAS_RANGE_SQUEEZE,                     // レンジ・収縮
+    BIAS_RANGE_BREAKOUT_POTENTIAL_UP,       // レンジブレイク期待・上
+    BIAS_RANGE_BREAKOUT_POTENTIAL_DOWN,     // レンジブレイク期待・下
+
+    // --- Bullish States (買い優位) ---
+    BIAS_ALIGNED_EARLY_ENTRY_BUY,           // 順張りアーリーエントリー・買
+    BIAS_SHAKEOUT_BUY,                      // シェイクアウト・買
+    BIAS_DOMINANT_CORE_TREND_BUY,           // 完全順行コアトレンド・買
+    BIAS_DOMINANT_PULLBACK_BUY,             // 完全順行プルバック・買
+    BIAS_ALIGNED_CORE_TREND_BUY,            // 順張りコアトレンド・買
+    BIAS_CONFLICTING_PULLBACK_BUY,          // 逆行プルバック・買
+    BIAS_TREND_EXHAUSTION_BUY,              // トレンド枯渇・買
+
+    // --- Bearish States (売り優位) ---
+    BIAS_ALIGNED_EARLY_ENTRY_SELL,          // 順張りアーリーエントリー・売
+    BIAS_SHAKEOUT_SELL,                     // シェイクアウト・売
+    BIAS_DOMINANT_CORE_TREND_SELL,          // 完全順行コアトレンド・売
+    BIAS_DOMINANT_PULLBACK_SELL,            // 完全順行プルバック・売
+    BIAS_ALIGNED_CORE_TREND_SELL,           // 順張りコアトレンド・売
+    BIAS_CONFLICTING_PULLBACK_SELL,         // 逆行プルバック・売
+    BIAS_TREND_EXHAUSTION_SELL              // トレンド枯渇・売
 };
 
 // --- 新規: バイアスの段階の定義 ---
@@ -297,6 +313,12 @@ input int    InpScore_MACD_Momentum  = 3;   // [スコア] 帯MACDモメンタ�
 input int    InpBias_ScoreDiff_Dominant= 30;  // [バイアス] 優位性と判断するスコア差
 input int    InpBias_Score_Range     = 20;  // [バイアス] レンジと判断するスコア閾値
 
+input group "=== スイング分析設定 ===";
+input int    InpSwing_ZigzagDepth      = 12;      // ZigZag: Depth
+input int    InpSwing_ZigzagDeviation  = 5;       // ZigZag: Deviation
+input int    InpSwing_ZigzagBackstep   = 3;       // ZigZag: Backstep
+input double InpSwing_MinAtrMultiplier = 0.5;     // 分析対象とする最小スイングサイズ (ATR倍率)
+
 input group "=== 大循環ストキャス 設定 ===";
 input bool              InpStoch_UseDaiJunkan   = true;   // 大循環ストキャスを有効にする
 input ENUM_STOCH_MODE   InpStoch_SignalMode     = MODE_EVERYWHERE; // ←【新規追加】シグナルモード
@@ -324,6 +346,7 @@ input double Inp_RSI_LowerLevel     = 40.0;     // RSIの下限レベル
 
 input group "=== エントリーロジック設定 ===";
 input bool InpAllowRangeEntry   = true;     // ? レンジ相場でのエントリーを許可する
+input double          InpEntry_MinRewardRiskRatio = 1.2;  // エントリーの最低リスクリワード比率 (0.1以上)
 input bool            InpUsePivotLines      = true;     // ピボットラインを使用する
 input ENUM_TIMEFRAMES InpPivotPeriod        = PERIOD_H1;// ピボット時間足
 input bool   InpShowS2R2          = true;       // S2/R2ラインを表示
@@ -913,20 +936,17 @@ void UpdateEnvironmentAnalysis()
 }
 
 //+------------------------------------------------------------------+
-//| 【FSM修正版】総合優位性スコアと取引バイアスを計算する (警告対策版)
+//| 【市場サイクルモデル版】総合優位性スコアと取引バイアスを計算する
 //+------------------------------------------------------------------+
 void CalculateOverallBiasAndScore()
 {
+    // --- スコアリング ---
     g_env_state.total_buy_score = 0;
     g_env_state.total_sell_score = 0;
-    g_env_state.current_trade_bias = BIAS_NONE;
-    g_env_state.current_bias_phase = PHASE_NONE;
-
     int weights[ENUM_TIMEFRAMES_COUNT];
     weights[TF_CURRENT_INDEX]      = InpWeightCurrentTF;
     weights[TF_INTERMEDIATE_INDEX] = InpWeightIntermediateTF;
     weights[TF_HIGHER_INDEX]       = InpWeightHigherTF;
-    
     for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
     {
         ENUM_MASTER_STATE master_state = g_env_state.mtf_master_state[i];
@@ -934,7 +954,6 @@ void CalculateOverallBiasAndScore()
         ENUM_SLOPE_STATE short_slope = g_env_state.mtf_slope_short[i];
         DaijunkanMACDValues macd = g_env_state.mtf_macd_values[i];
         int weight = weights[i];
-
         switch(master_state)
         {
             case STATE_1B_CONFIRMED: g_env_state.total_buy_score += (InpScore_State_Confirmed * weight / 10); break;
@@ -950,7 +969,6 @@ void CalculateOverallBiasAndScore()
             case STATE_3_TRANSITION_DOWN: g_env_state.total_sell_score += (InpScore_State_Transition * weight / 10); break;
             case STATE_4C_MATURE:    g_env_state.total_sell_score += (InpScore_State_Mature * weight / 10); break;
         }
-
         if (long_slope == SLOPE_UP_STRONG) g_env_state.total_buy_score += (InpScore_Slope_Long_Strong * weight / 10);
         if (long_slope == SLOPE_UP_WEAK)   g_env_state.total_buy_score += (InpScore_Slope_Long_Weak * weight / 10);
         if (long_slope == SLOPE_DOWN_STRONG) g_env_state.total_sell_score += (InpScore_Slope_Long_Strong * weight / 10);
@@ -965,72 +983,65 @@ void CalculateOverallBiasAndScore()
         if (macd.obi_macd > 0 && macd.obi_macd_slope > 0) g_env_state.total_buy_score += (InpScore_MACD_Momentum * weight / 10);
         if (macd.obi_macd < 0 && macd.obi_macd_slope < 0) g_env_state.total_sell_score += (InpScore_MACD_Momentum * weight / 10);
     }
-    
-    if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1B_CONFIRMED &&
-        g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_1B_CONFIRMED &&
-        g_env_state.total_buy_score > (g_env_state.total_sell_score + InpBias_ScoreDiff_Dominant))
-    {
-        g_env_state.current_trade_bias = BIAS_CORE_TREND_BUY;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING;
-        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1A_NASCENT || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_TRANSITION_UP) g_env_state.current_bias_phase = PHASE_INITIATING;
-        else if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1C_MATURE) g_env_state.current_bias_phase = PHASE_MATURING;
+
+    // --- 新しいバイアス判定ロジック ---
+    g_env_state.current_trade_bias = BIAS_UNCLEAR; // デフォルトは「不明確」
+    g_env_state.current_bias_phase = PHASE_NONE;   // フェーズもリセット
+
+    ENUM_MASTER_STATE h_tf = g_env_state.mtf_master_state[TF_HIGHER_INDEX];
+    ENUM_MASTER_STATE m_tf = g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX];
+    ENUM_MASTER_STATE c_tf = g_env_state.mtf_master_state[TF_CURRENT_INDEX];
+
+    // --- 🚀 完全順行 (買い) ---
+    if (h_tf == STATE_1B_CONFIRMED && m_tf == STATE_1B_CONFIRMED && c_tf == STATE_1B_CONFIRMED) {
+        g_env_state.current_trade_bias = BIAS_DOMINANT_CORE_TREND_BUY;
+    } else if (h_tf == STATE_1B_CONFIRMED && m_tf == STATE_1B_CONFIRMED && c_tf == STATE_2_PULLBACK) {
+        g_env_state.current_trade_bias = BIAS_DOMINANT_PULLBACK_BUY;
     }
-    else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.total_sell_score > (g_env_state.total_buy_score + InpBias_ScoreDiff_Dominant))
-    {
-        g_env_state.current_trade_bias = BIAS_CORE_TREND_SELL;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING;
-        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4A_NASCENT || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_3_TRANSITION_DOWN) g_env_state.current_bias_phase = PHASE_INITIATING;
-        else if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4C_MATURE) g_env_state.current_bias_phase = PHASE_MATURING;
+    // --- 🚀 完全順行 (売り) ---
+    else if (h_tf == STATE_4B_CONFIRMED && m_tf == STATE_4B_CONFIRMED && c_tf == STATE_4B_CONFIRMED) {
+        g_env_state.current_trade_bias = BIAS_DOMINANT_CORE_TREND_SELL;
+    } else if (h_tf == STATE_4B_CONFIRMED && m_tf == STATE_4B_CONFIRMED && c_tf == STATE_5_RALLY) {
+        g_env_state.current_trade_bias = BIAS_DOMINANT_PULLBACK_SELL;
     }
-    else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1B_CONFIRMED &&
-             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_2_PULLBACK &&
-             g_env_state.total_buy_score > g_env_state.total_sell_score)
-    {
-        g_env_state.current_trade_bias = BIAS_PULLBACK_BUY;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING;
-        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_6_TRANSITION_UP || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1A_NASCENT) g_env_state.current_bias_phase = PHASE_MATURING;
+    // --- 📈 順張り局面 (買い) ---
+    else if ((h_tf == STATE_6_TRANSITION_UP || h_tf == STATE_1A_NASCENT) && (m_tf == STATE_1A_NASCENT || m_tf == STATE_1B_CONFIRMED)) {
+        g_env_state.current_trade_bias = BIAS_ALIGNED_EARLY_ENTRY_BUY;
+    } else if (h_tf == STATE_1B_CONFIRMED && m_tf == STATE_1B_CONFIRMED) {
+         g_env_state.current_trade_bias = BIAS_ALIGNED_CORE_TREND_BUY;
     }
-    else if (g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_5_RALLY &&
-             g_env_state.total_sell_score > g_env_state.total_buy_score)
-    {
-        g_env_state.current_trade_bias = BIAS_PULLBACK_SELL;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING;
-        if (g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_3_TRANSITION_DOWN || g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4A_NASCENT) g_env_state.current_bias_phase = PHASE_MATURING;
+    // --- 📈 順張り局面 (売り) ---
+    else if ((h_tf == STATE_3_TRANSITION_DOWN || h_tf == STATE_4A_NASCENT) && (m_tf == STATE_4A_NASCENT || m_tf == STATE_4B_CONFIRMED)) {
+        g_env_state.current_trade_bias = BIAS_ALIGNED_EARLY_ENTRY_SELL;
+    } else if (h_tf == STATE_4B_CONFIRMED && m_tf == STATE_4B_CONFIRMED) {
+         g_env_state.current_trade_bias = BIAS_ALIGNED_CORE_TREND_SELL;
     }
-    else if ((g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_6_TRANSITION_UP || g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_1A_NASCENT) &&
-             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_1B_CONFIRMED &&
-             g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_1B_CONFIRMED &&
-             g_env_state.total_buy_score > (g_env_state.total_sell_score + (InpBias_ScoreDiff_Dominant / 2)))
-    {
-        g_env_state.current_trade_bias = BIAS_EARLY_ENTRY_BUY;
-        g_env_state.current_bias_phase = PHASE_INITIATING;
+    // --- ✨ 特殊局面 (シェイクアウト) ---
+    else if (c_tf == STATE_3_REJECTION && (h_tf == STATE_1B_CONFIRMED || h_tf == STATE_2_PULLBACK)) {
+        g_env_state.current_trade_bias = BIAS_SHAKEOUT_BUY;
+    } else if (c_tf == STATE_6_REJECTION && (h_tf == STATE_4B_CONFIRMED || h_tf == STATE_5_RALLY)) {
+        g_env_state.current_trade_bias = BIAS_SHAKEOUT_SELL;
     }
-    else if ((g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_3_TRANSITION_DOWN || g_env_state.mtf_master_state[TF_HIGHER_INDEX] == STATE_4A_NASCENT) &&
-             g_env_state.mtf_master_state[TF_INTERMEDIATE_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.mtf_master_state[TF_CURRENT_INDEX] == STATE_4B_CONFIRMED &&
-             g_env_state.total_sell_score > (g_env_state.total_buy_score + (InpBias_ScoreDiff_Dominant / 2)))
-    {
-        g_env_state.current_trade_bias = BIAS_EARLY_ENTRY_SELL;
-        g_env_state.current_bias_phase = PHASE_INITIATING;
+    // --- ⚠️ 逆行警戒 ---
+    else if (h_tf == STATE_1B_CONFIRMED && (m_tf == STATE_4A_NASCENT || m_tf == STATE_4B_CONFIRMED || m_tf == STATE_5_RALLY)) {
+        g_env_state.current_trade_bias = BIAS_CONFLICTING_PULLBACK_BUY;
+    } else if (h_tf == STATE_4B_CONFIRMED && (m_tf == STATE_1A_NASCENT || m_tf == STATE_1B_CONFIRMED || m_tf == STATE_2_PULLBACK)) {
+        g_env_state.current_trade_bias = BIAS_CONFLICTING_PULLBACK_SELL;
     }
-    else if (g_env_state.total_buy_score < InpBias_Score_Range || g_env_state.total_sell_score < InpBias_Score_Range ||
-             MathAbs(g_env_state.total_buy_score - g_env_state.total_sell_score) < (InpBias_Score_Range / 2))
-    {
-        g_env_state.current_trade_bias = BIAS_RANGE_TRADE;
-        g_env_state.current_bias_phase = PHASE_PROGRESSING;
-        if ( (g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope > 0 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd > g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal) ||
-             (g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd_slope < 0 && g_env_state.mtf_macd_values[TF_HIGHER_INDEX].obi_macd < g_env_state.mtf_macd_values[TF_HIGHER_INDEX].signal) )
-        {
-            g_env_state.current_bias_phase = PHASE_MATURING;
-        }
+    // --- 🏁 決済重視 (トレンド枯渇) ---
+    else if (h_tf == STATE_1C_MATURE || m_tf == STATE_1C_MATURE) {
+        g_env_state.current_trade_bias = BIAS_TREND_EXHAUSTION_BUY;
+    } else if (h_tf == STATE_4C_MATURE || m_tf == STATE_4C_MATURE) {
+        g_env_state.current_trade_bias = BIAS_TREND_EXHAUSTION_SELL;
+    }
+    // --- 🧘 レンジ相場 ---
+    else {
+        g_env_state.current_trade_bias = BIAS_RANGE_BOUND; // どの強いパターンにも当てはまらない場合はレンジと見なす
     }
 }
 
 //+------------------------------------------------------------------+
-//| 状態に基づいて決済を判断する統合関数 (警告修正・完成版)
+//| 状態に基づいて決済を判断する統合関数 (市場サイクルモデル版)
 //+------------------------------------------------------------------+
 void CheckStateBasedExits()
 {
@@ -1057,19 +1068,27 @@ void CheckStateBasedExits()
                 }
                 if(InpExit_OnCounterBias && !should_close)
                 {
-                    if(g_env_state.current_trade_bias == BIAS_CORE_TREND_SELL || g_env_state.current_trade_bias == BIAS_PULLBACK_SELL)
+                    // --- ▼▼▼ ここを修正 ▼▼▼ ---
+                    bool is_sell_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL ||
+                                         g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL ||
+                                         g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL ||
+                                         g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL);
+                    if(is_sell_bias)
                     {
                         should_close = true;
                         reason = "反対バイアス発生";
                     }
+                    // --- ▲▲▲ ここまで修正 ▲▲▲ ---
                 }
                 if(InpExit_OnRange && !should_close)
                 {
-                    if(g_env_state.current_trade_bias == BIAS_RANGE_TRADE && g_env_state.current_bias_phase == PHASE_PROGRESSING)
+                    // --- ▼▼▼ ここを修正 ▼▼▼ ---
+                    if(g_env_state.current_trade_bias == BIAS_RANGE_BOUND)
                     {
                         should_close = true;
                         reason = "レンジ相場突入";
                     }
+                    // --- ▲▲▲ ここまで修正 ▲▲▲ ---
                 }
             }
             else // SELL
@@ -1084,19 +1103,27 @@ void CheckStateBasedExits()
                 }
                 if(InpExit_OnCounterBias && !should_close)
                 {
-                    if(g_env_state.current_trade_bias == BIAS_CORE_TREND_BUY || g_env_state.current_trade_bias == BIAS_PULLBACK_BUY)
+                    // --- ▼▼▼ ここを修正 ▼▼▼ ---
+                     bool is_buy_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY ||
+                                         g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY ||
+                                         g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY ||
+                                         g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY);
+                    if(is_buy_bias)
                     {
                         should_close = true;
                         reason = "反対バイアス発生";
                     }
+                    // --- ▲▲▲ ここまで修正 ▲▲▲ ---
                 }
                 if(InpExit_OnRange && !should_close)
                 {
-                    if(g_env_state.current_trade_bias == BIAS_RANGE_TRADE && g_env_state.current_bias_phase == PHASE_PROGRESSING)
+                    // --- ▼▼▼ ここを修正 ▼▼▼ ---
+                    if(g_env_state.current_trade_bias == BIAS_RANGE_BOUND)
                     {
                         should_close = true;
                         reason = "レンジ相場突入";
                     }
+                    // --- ▲▲▲ ここまで修正 ▲▲▲ ---
                 }
             }
 
@@ -1115,7 +1142,7 @@ void CheckStateBasedExits()
                     {
                         if(pos_type == POSITION_TYPE_BUY)
                         {
-                            if (!buyGroup.timeExitResetDone)
+                             if (!buyGroup.timeExitResetDone)
                             {
                                 PrintFormat("ログ: 時間経過によりBUYポジションのTPをリセットします (トリガーポジション: #%d)", ticket);
                                 isBuyTPManuallyMoved = false;
@@ -1125,7 +1152,7 @@ void CheckStateBasedExits()
                         }
                         else
                         {
-                            if (!sellGroup.timeExitResetDone)
+                             if (!sellGroup.timeExitResetDone)
                             {
                                 PrintFormat("ログ: 時間経過によりSELLポジションのTPをリセットします (トリガーポジション: #%d)", ticket);
                                 isSellTPManuallyMoved = false;
@@ -1161,7 +1188,7 @@ void CheckStateBasedExits()
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す (詳細ログ出力付き診断バージョン)
+//| 新規エントリーを探す (RRRフィルター版)
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
@@ -1194,9 +1221,16 @@ void CheckEntry()
         else
         {
             Print("診断 (BUY): スコア条件クリア");
-            bool is_buy_bias = (g_env_state.current_trade_bias == BIAS_CORE_TREND_BUY || g_env_state.current_trade_bias == BIAS_PULLBACK_BUY || g_env_state.current_trade_bias == BIAS_EARLY_ENTRY_BUY);
-            bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_TRADE);
-            PrintFormat("診断 (BUY): 現在の取引バイアス = %s", EnumToString(g_env_state.current_trade_bias));
+
+            bool is_buy_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY ||
+                                g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY ||
+                                g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY ||
+                                g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY ||
+                                g_env_state.current_trade_bias == BIAS_SHAKEOUT_BUY);
+            bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_BOUND);
+            string bias_jp_text = ""; string temp_icon; color temp_color;
+            TradeBiasToString(g_env_state.current_trade_bias, bias_jp_text, temp_icon, temp_color);
+            PrintFormat("診断 (BUY): 現在の取引バイアス = %s", bias_jp_text);
 
             if (!(is_buy_bias || range_entry_ok))
             {
@@ -1205,16 +1239,45 @@ void CheckEntry()
             else
             {
                 Print("診断 (BUY): バイアス条件クリア");
-                if (buyGroup.positionCount >= InpMaxPositions)
-                {
-                    PrintFormat("診断結果 (BUY): エントリー見送り (理由: 最大ポジション数到達 %d/%d)", buyGroup.positionCount, InpMaxPositions);
-                }
-                else
-                {
-                    Print("診断 (BUY): 最大ポジション数クリア");
-                    Print("診断結果 (BUY): 全ての条件をクリア。エントリーを実行します。");
-                    MqlTick tick;
-                    if(SymbolInfoTick(_Symbol, tick)) PlaceOrder(true, tick.ask, g_env_state.total_buy_score);
+
+                // ▼▼▼ ここからRRRフィルター ▼▼▼
+                MqlTick tick;
+                if(!SymbolInfoTick(_Symbol, tick)) return;
+                
+                double entry_price = tick.ask;
+                double sl_price = CalculateEntryStopLoss(true);
+                double tp_price = zonalFinalTPLine_Buy;
+
+                if(sl_price <= 0 || tp_price <= 0) {
+                    Print("診断結果 (BUY): エントリー見送り (理由: RRR計算用のSL/TP価格が無効です)");
+                } else {
+                    double risk_distance = MathAbs(entry_price - sl_price);
+                    double reward_distance = MathAbs(tp_price - entry_price);
+
+                    if(risk_distance < _Point) {
+                        Print("診断結果 (BUY): エントリー見送り (理由: リスク値が0のためRRR計算不能)");
+                    } else {
+                        double rrr = reward_distance / risk_distance;
+                        PrintFormat("診断 (BUY): RRR = %.2f (リワード:%.5f / リスク:%.5f), 最低RRR = %.2f", rrr, reward_distance, risk_distance, InpEntry_MinRewardRiskRatio);
+                        
+                        if(rrr < InpEntry_MinRewardRiskRatio) {
+                            Print("診断結果 (BUY): エントリー見送り (理由: リスクリワード比が不足)");
+                        } else {
+                            Print("診断 (BUY): RRR条件クリア");
+                            // ▲▲▲ RRRフィルターここまで ▲▲▲
+
+                            if (buyGroup.positionCount >= InpMaxPositions)
+                            {
+                                PrintFormat("診断結果 (BUY): エントリー見送り (理由: 最大ポジション数到達 %d/%d)", buyGroup.positionCount, InpMaxPositions);
+                            }
+                            else
+                            {
+                                Print("診断 (BUY): 最大ポジション数クリア");
+                                Print("診断結果 (BUY): 全ての条件をクリア。エントリーを実行します。");
+                                PlaceOrder(true, entry_price, g_env_state.total_buy_score);
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1230,10 +1293,16 @@ void CheckEntry()
         else
         {
             Print("診断 (SELL): スコア条件クリア");
-            bool is_sell_bias = (g_env_state.current_trade_bias == BIAS_CORE_TREND_SELL || g_env_state.current_trade_bias == BIAS_PULLBACK_SELL || g_env_state.current_trade_bias == BIAS_EARLY_ENTRY_SELL);
-            bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_TRADE);
-            PrintFormat("診断 (SELL): 現在の取引バイアス = %s", EnumToString(g_env_state.current_trade_bias));
-
+            bool is_sell_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL ||
+                                 g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL ||
+                                 g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL ||
+                                 g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL ||
+                                 g_env_state.current_trade_bias == BIAS_SHAKEOUT_SELL);
+            bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_BOUND);
+            string bias_jp_text = ""; string temp_icon; color temp_color;
+            TradeBiasToString(g_env_state.current_trade_bias, bias_jp_text, temp_icon, temp_color);
+            PrintFormat("診断 (SELL): 現在の取引バイアス = %s", bias_jp_text);
+            
             if (!(is_sell_bias || range_entry_ok))
             {
                 Print("診断結果 (SELL): エントリー見送り (理由: 取引バイアス不一致)");
@@ -1241,21 +1310,71 @@ void CheckEntry()
             else
             {
                 Print("診断 (SELL): バイアス条件クリア");
-                if (sellGroup.positionCount >= InpMaxPositions)
-                {
-                    PrintFormat("診断結果 (SELL): エントリー見送り (理由: 最大ポジション数到達 %d/%d)", sellGroup.positionCount, InpMaxPositions);
-                }
-                else
-                {
-                    Print("診断 (SELL): 最大ポジション数クリア");
-                    Print("診断結果 (SELL): 全ての条件をクリア。エントリーを実行します。");
-                    MqlTick tick;
-                    if(SymbolInfoTick(_Symbol, tick)) PlaceOrder(false, tick.bid, g_env_state.total_sell_score);
+
+                // ▼▼▼ ここからRRRフィルター ▼▼▼
+                MqlTick tick;
+                if(!SymbolInfoTick(_Symbol, tick)) return;
+
+                double entry_price = tick.bid;
+                double sl_price = CalculateEntryStopLoss(false);
+                double tp_price = zonalFinalTPLine_Sell;
+
+                if(sl_price <= 0 || tp_price <= 0) {
+                    Print("診断結果 (SELL): エントリー見送り (理由: RRR計算用のSL/TP価格が無効です)");
+                } else {
+                    double risk_distance = MathAbs(entry_price - sl_price);
+                    double reward_distance = MathAbs(tp_price - entry_price);
+
+                    if(risk_distance < _Point) {
+                        Print("診断結果 (SELL): エントリー見送り (理由: リスク値が0のためRRR計算不能)");
+                    } else {
+                        double rrr = reward_distance / risk_distance;
+                        PrintFormat("診断 (SELL): RRR = %.2f (リワード:%.5f / リスク:%.5f), 最低RRR = %.2f", rrr, reward_distance, risk_distance, InpEntry_MinRewardRiskRatio);
+
+                        if(rrr < InpEntry_MinRewardRiskRatio) {
+                            Print("診断結果 (SELL): エントリー見送り (理由: リスクリワード比が不足)");
+                        } else {
+                            Print("診断 (SELL): RRR条件クリア");
+                            // ▲▲▲ RRRフィルターここまで ▲▲▲
+
+                            if (sellGroup.positionCount >= InpMaxPositions)
+                            {
+                                PrintFormat("診断結果 (SELL): エントリー見送り (理由: 最大ポジション数到達 %d/%d)", sellGroup.positionCount, InpMaxPositions);
+                            }
+                            else
+                            {
+                                Print("診断 (SELL): 最大ポジション数クリア");
+                                Print("診断結果 (SELL): 全ての条件をクリア。エントリーを実行します。");
+                                PlaceOrder(false, entry_price, g_env_state.total_sell_score);
+                            }
+                        }
+                    }
                 }
             }
         }
     }
     Print("----------------------------------------------------------");
+}
+
+//+------------------------------------------------------------------+
+//| 【フィルター用】エントリー前のSL価格を計算する
+//+------------------------------------------------------------------+
+double CalculateEntryStopLoss(bool isBuy)
+{
+    // このフィルターでは、ユーザーの指示通り「反対TPライン」のみをSLの基準とし、ATRバッファは考慮しない
+    if(isBuy)
+    {
+        // 買いエントリーの場合、SLの基準は「売りの最終TPライン」
+        if(zonalFinalTPLine_Sell > 0) return(zonalFinalTPLine_Sell);
+    }
+    else
+    {
+        // 売りエントリーの場合、SLの基準は「買いの最終TPライン」
+        if(zonalFinalTPLine_Buy > 0) return(zonalFinalTPLine_Buy);
+    }
+    
+    // 反対TPラインが存在しない場合は0を返す
+    return(0.0);
 }
 
 //+------------------------------------------------------------------+
@@ -2434,9 +2553,8 @@ double GetConversionRate(string from_currency, string to_currency)
 //| ================================================================ |
 //|                                                                  |
 //+------------------------------------------------------------------+
-
 //+------------------------------------------------------------------+
-//| 情報パネルの管理
+//| 【パネル表示調整版】情報パネルの管理
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
@@ -2449,130 +2567,132 @@ void ManageInfoPanel()
     ENUM_BASE_CORNER  corner = CORNER_LEFT_UPPER;
     ENUM_ANCHOR_POINT anchor = ANCHOR_LEFT;
     bool is_lower_corner = false;
-    
     switch(InpPanelCorner)
     {
-        case PC_LEFT_UPPER:  corner = CORNER_LEFT_UPPER; anchor = ANCHOR_LEFT;  break;
+        case PC_LEFT_UPPER:  corner = CORNER_LEFT_UPPER;  anchor = ANCHOR_LEFT;  break;
         case PC_RIGHT_UPPER: corner = CORNER_RIGHT_UPPER; anchor = ANCHOR_RIGHT; break;
-        case PC_LEFT_LOWER:  corner = CORNER_LEFT_LOWER; anchor = ANCHOR_LEFT;  is_lower_corner = true; break;
+        case PC_LEFT_LOWER:  corner = CORNER_LEFT_LOWER;  anchor = ANCHOR_LEFT;  is_lower_corner = true; break;
         case PC_RIGHT_LOWER: corner = CORNER_RIGHT_LOWER; anchor = ANCHOR_RIGHT; is_lower_corner = true; break;
     }
 
-    int line = 0;
-    string sep = "──────────────────";
-    DrawPanelLine(line++, "▶ ApexFlowEA v7.0 (統合戦略)", "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    // --- 各行のフォントサイズとテキストを事前に準備 ---
+    int sizes[];
+    string texts[], icons[];
+    color text_colors[], icon_colors[];
 
-    string bias_text, phase_text, bias_icon;
-    color bias_color;
-    MasterStateToBias(g_env_state.current_trade_bias, g_env_state.current_bias_phase, bias_text, phase_text, bias_icon, bias_color);
-    DrawPanelLine(line++, "バイアス: " + bias_text + " " + phase_text, bias_icon, clrWhite, bias_color, corner, anchor, InpPanelFontSize + 2, is_lower_corner);
+    // --- 描画する内容を動的に配列へ格納 ---
+    int line_count = 0;
+    #define ADD_LINE(fs, txt, icn, tc, ic) \
+        ArrayResize(sizes, line_count + 1); sizes[line_count] = fs; \
+        ArrayResize(texts, line_count + 1); texts[line_count] = txt; \
+        ArrayResize(icons, line_count + 1); icons[line_count] = icn; \
+        ArrayResize(text_colors, line_count + 1); text_colors[line_count] = tc; \
+        ArrayResize(icon_colors, line_count + 1); icon_colors[line_count] = ic; \
+        line_count++;
+
+    // --- パネル内容の定義 ---
+    ADD_LINE(InpPanelFontSize, "▶ ApexFlowEA v7.2 (市場サイクルモデル)", "", clrWhite, clrNONE);
+    ADD_LINE(InpPanelFontSize, "──────────────────", "", clrGainsboro, clrNONE);
     
-    string buy_score_bar = "";
+    // ▼▼▼ ラベルの色を clrWhite に変更 ▼▼▼
+    string category_text = GetBiasCategoryToString(g_env_state.current_trade_bias);
+    ADD_LINE(InpPanelFontSize, "市場サイクル: " + category_text, "", clrWhite, clrNONE);
+
+    string bias_text, bias_icon; color bias_color;
+    TradeBiasToString(g_env_state.current_trade_bias, bias_text, bias_icon, bias_color);
+    ADD_LINE(InpPanelFontSize + 2, "取引バイアス: " + bias_text, bias_icon, clrWhite, bias_color);
+
+    string buy_score_bar = "", sell_score_bar = "";
     int buy_bar_length = (InpScorePerSymbol > 0) ? (int)MathRound((double)g_env_state.total_buy_score / InpScorePerSymbol) : 0;
     for(int i = 0; i < buy_bar_length; i++) buy_score_bar += "●";
-    
-    string sell_score_bar = "";
     int sell_bar_length = (InpScorePerSymbol > 0) ? (int)MathRound((double)g_env_state.total_sell_score / InpScorePerSymbol) : 0;
     for(int i = 0; i < sell_bar_length; i++) sell_score_bar += "●";
-    
-    DrawPanelLine(line++, "BUY優位性: " + buy_score_bar + " (" + (string)g_env_state.total_buy_score + ")", "", clrLime, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "SELL優位性: " + sell_score_bar + " (" + (string)g_env_state.total_sell_score + ")", "", clrTomato, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    bool buy_signal_active = false, sell_signal_active = false;
-    
-    // ▼▼▼【ここを修正】引数を4つに変更 ▼▼▼
-    string buy_signal_name, sell_signal_name; // このパネルでは使わないが、関数の仕様に合わせる
-    CheckActiveEntrySignals(buy_signal_active, sell_signal_active, buy_signal_name, sell_signal_name);
-    // ▲▲▲【修正ここまで】▲▲▲
-    
-    if (buy_signal_active && g_env_state.total_buy_score >= InpEntryScore) DrawPanelLine(line++, "ENTRY: BUYトリガー", "✔", clrGreen, clrGreen, corner, anchor, InpPanelFontSize, is_lower_corner);
-    else if (sell_signal_active && g_env_state.total_sell_score >= InpEntryScore) DrawPanelLine(line++, "ENTRY: SELLトリガー", "✔", clrRed, clrRed, corner, anchor, InpPanelFontSize, is_lower_corner);
-    else DrawPanelLine(line++, "ENTRY: 待機中", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    ADD_LINE(InpPanelFontSize, "BUY優位性: " + buy_score_bar + " (" + (string)g_env_state.total_buy_score + ")", "", clrLime, clrNONE);
+    ADD_LINE(InpPanelFontSize, "SELL優位性: " + sell_score_bar + " (" + (string)g_env_state.total_sell_score + ")", "", clrTomato, clrNONE);
 
-    DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "■ MTFトレンド概要", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    bool buy_signal_active = false, sell_signal_active = false;
+    string buy_signal_name, sell_signal_name;
+    CheckActiveEntrySignals(buy_signal_active, sell_signal_active, buy_signal_name, sell_signal_name);
+    if(buy_signal_active && g_env_state.total_buy_score >= InpEntryScore) {
+        ADD_LINE(InpPanelFontSize, "ENTRY: BUYトリガー", "✔", clrGreen, clrGreen);
+    } else if(sell_signal_active && g_env_state.total_sell_score >= InpEntryScore) {
+        ADD_LINE(InpPanelFontSize, "ENTRY: SELLトリガー", "✔", clrRed, clrRed);
+    } else {
+        ADD_LINE(InpPanelFontSize, "ENTRY: 待機中", "", clrGainsboro, clrNONE);
+    }
+    
+    ADD_LINE(InpPanelFontSize, "──────────────────", "", clrGainsboro, clrNONE);
+    ADD_LINE(InpPanelFontSize, "■ MTFトレンド概要", "", clrGainsboro, clrNONE);
     
     ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
-    mtf_periods[TF_CURRENT_INDEX]      = _Period;
-    mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe;
-    mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;
-    
-    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
-    {
-        string tf_name = (i == TF_CURRENT_INDEX) ? EnumToString(_Period) + "(現)" : (i == TF_INTERMEDIATE_INDEX) ? EnumToString(InpIntermediateTimeframe) + "(中)" : EnumToString(InpHigherTimeframe) + "(高)";
-        color stage_color;
-        string stage_text = MasterStateToString(g_env_state.mtf_master_state[i], stage_color);
-        DrawPanelLine(line++, "  TF(" + tf_name + "): " + stage_text, "", stage_color, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-        string long_slope_text = SlopeStateToString(g_env_state.mtf_slope_long[i]);
-        DrawPanelLine(line++, "    ├ 長期MA: " + long_slope_text, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-        string obi_macd_status = ObiMacdToString(g_env_state.mtf_macd_values[i]);
-        DrawPanelLine(line++, "    └ 帯MACD: " + obi_macd_status, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+    mtf_periods[TF_CURRENT_INDEX] = _Period; mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe; mtf_periods[TF_HIGHER_INDEX] = InpHigherTimeframe;
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++) {
+        // ▼▼▼ "PERIOD_" を削除する処理を追加 ▼▼▼
+        string tf_string_full = (i == TF_CURRENT_INDEX) ? EnumToString(_Period) : (i == TF_INTERMEDIATE_INDEX) ? EnumToString(InpIntermediateTimeframe) : EnumToString(InpHigherTimeframe);
+        StringReplace(tf_string_full, "PERIOD_", "");
+        string tf_name = (i == TF_CURRENT_INDEX) ? tf_string_full + "(現)" : (i == TF_INTERMEDIATE_INDEX) ? tf_string_full + "(中)" : tf_string_full + "(高)";
+        
+        color stage_color; string stage_text = MasterStateToString(g_env_state.mtf_master_state[i], stage_color);
+        ADD_LINE(InpPanelFontSize, "  TF(" + tf_name + "): " + stage_text, "", stage_color, clrNONE);
+        ADD_LINE(InpPanelFontSize, "    ├ 長期MA: " + SlopeStateToString(g_env_state.mtf_slope_long[i]), "", clrWhite, clrNONE);
+        ADD_LINE(InpPanelFontSize, "    └ 帯MACD: " + ObiMacdToString(g_env_state.mtf_macd_values[i]), "", clrWhite, clrNONE);
     }
-    
-    DrawPanelLine(line++, sep, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "■ ポジション", "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string buy_pos_text = "BUY : ---";
-    if(buyGroup.isActive) buy_pos_text = StringFormat("BUY (%d): %.2f Lot (Avg: %.5f)", buyGroup.positionCount, buyGroup.totalLotSize, buyGroup.averageEntryPrice);
-    DrawPanelLine(line++, buy_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string sell_pos_text = "SELL: ---";
-    if(sellGroup.isActive) sell_pos_text = StringFormat("SELL(%d): %.2f Lot (Avg: %.5f)", sellGroup.positionCount, sellGroup.totalLotSize, sellGroup.averageEntryPrice);
-    DrawPanelLine(line++, sell_pos_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string buy_be_status = (buyGroup.isActive && buyGroup.splitsDone >= InpBreakEvenAfterSplits && InpBreakEvenAfterSplits > 0) ? "BE設定済" : "BE未設定";
-    string sell_be_status = (sellGroup.isActive && sellGroup.splitsDone >= InpBreakEvenAfterSplits && InpBreakEvenAfterSplits > 0) ? "BE設定済" : "BE未設定";
-    DrawPanelLine(line++, "  ├ BUY BE: " + buy_be_status, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    DrawPanelLine(line++, "  └ SELL BE: " + sell_be_status, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string next_split_text_buy = "---";
-    if (buyGroup.isActive && buyGroup.splitsDone < buyGroup.lockedInSplitCount && ArraySize(buyGroup.splitPrices) > buyGroup.splitsDone) {
-        next_split_text_buy = StringFormat("BUY #%d @%.5f", buyGroup.splitsDone + 1, buyGroup.splitPrices[buyGroup.splitsDone]);
-    }
-    DrawPanelLine(line++, "  ├ 次分割(買): " + next_split_text_buy, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    string next_split_text_sell = "---";
-    if (sellGroup.isActive && sellGroup.splitsDone < sellGroup.lockedInSplitCount && ArraySize(sellGroup.splitPrices) > sellGroup.splitsDone) {
-        next_split_text_sell = StringFormat("SELL #%d @%.5f", sellGroup.splitsDone + 1, sellGroup.splitPrices[sellGroup.splitsDone]);
-    }
-    DrawPanelLine(line++, "  └ 次分割(売): " + next_split_text_sell, "", clrWhite, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
+
+    ADD_LINE(InpPanelFontSize, "──────────────────", "", clrGainsboro, clrNONE);
+    ADD_LINE(InpPanelFontSize, "■ ポジション", "", clrGainsboro, clrNONE);
+    ADD_LINE(InpPanelFontSize, buyGroup.isActive ? StringFormat("BUY (%d): %.2f Lot (Avg: %.5f)", buyGroup.positionCount, buyGroup.totalLotSize, buyGroup.averageEntryPrice) : "BUY : ---", "", clrGainsboro, clrNONE);
+    ADD_LINE(InpPanelFontSize, sellGroup.isActive ? StringFormat("SELL(%d): %.2f Lot (Avg: %.5f)", sellGroup.positionCount, sellGroup.totalLotSize, sellGroup.averageEntryPrice) : "SELL: ---", "", clrGainsboro, clrNONE);
     
     long time_remaining = (iTime(_Symbol, _Period, 0) + PeriodSeconds(_Period)) - TimeCurrent();
     if (time_remaining < 0) time_remaining = 0;
-    string timer_text = StringFormat("Next Bar: %02d:%02d", time_remaining / 60, time_remaining % 60);
-    DrawPanelLine(line++, timer_text, "", clrGainsboro, clrNONE, corner, anchor, InpPanelFontSize, is_lower_corner);
-    
-    int max_expected_lines = 50;
-    for(int i = line; i < max_expected_lines; i++) 
+    ADD_LINE(InpPanelFontSize, StringFormat("Next Bar: %02d:%02d", time_remaining / 60, time_remaining % 60), "", clrGainsboro, clrNONE);
+
+    // --- Y座標の計算と描画実行 ---
+    int current_y_pos = p_panel_y_offset;
+    if(is_lower_corner)
     {
-        string text_obj_name = g_panelPrefix + "Text_" + (string)i;
-        string icon_obj_name = g_panelPrefix + "Icon_" + (string)i;
-        ObjectSetString(0, text_obj_name, OBJPROP_TEXT, "");
-        ObjectSetString(0, icon_obj_name, OBJPROP_TEXT, "");
+        // 下コーナーの場合、全行の高さを合計し、一番上の行のY座標を決定
+        int total_height = 0;
+        for(int i = 0; i < line_count; i++) total_height += (int)round(sizes[i] * 1.5);
+        current_y_pos += total_height;
+    }
+
+    for(int i = 0; i < line_count; i++)
+    {
+        int y_step = (int)round(sizes[i] * 1.5);
+        if(is_lower_corner)
+        {
+            // 下コーナーの場合、次の行の座標を計算してから描画
+            current_y_pos -= y_step;
+        }
+        
+        DrawPanelLine(i, current_y_pos, texts[i], icons[i], text_colors[i], icon_colors[i], corner, anchor, sizes[i]);
+        
+        if(!is_lower_corner)
+        {
+            // 上コーナーの場合、描画してから次の行の座標を計算
+            current_y_pos += y_step;
+        }
+    }
+    
+    // --- 余分な行をクリア ---
+    for(int i = line_count; i < 50; i++) 
+    {
+        ObjectSetString(0, g_panelPrefix + "Text_" + (string)i, OBJPROP_TEXT, "");
+        ObjectSetString(0, g_panelPrefix + "Icon_" + (string)i, OBJPROP_TEXT, "");
     }
 }
 
 //+------------------------------------------------------------------+
-//| パネルの1行を描画するヘルパー関数 (更新処理最適化版)
+//| パネルの1行を描画するヘルパー関数 (Y座標直接指定版)
 //+------------------------------------------------------------------+
-void DrawPanelLine(int line_index, string text, string icon, color text_color, color icon_color, ENUM_BASE_CORNER corner, ENUM_ANCHOR_POINT anchor, int font_size, bool is_lower)
+void DrawPanelLine(int line_index, int y_pos, string text, string icon, color text_color, color icon_color, ENUM_BASE_CORNER corner, ENUM_ANCHOR_POINT anchor, int font_size)
 {
     string text_obj_name = g_panelPrefix + "Text_" + (string)line_index;
     string icon_obj_name = g_panelPrefix + "Icon_" + (string)line_index;
 
     int x_pos = p_panel_x_offset;
-    int y_pos_start = p_panel_y_offset;
-    int y_step = (int)round(font_size * 1.5);
     int icon_text_gap_left = 210;
-
-    int y_pos;
-    if(is_lower) {
-        int estimated_max_lines = 22;
-        y_pos = y_pos_start + ((estimated_max_lines - 1 - line_index) * y_step);
-    } else {
-        y_pos = y_pos_start + (line_index * y_step);
-    }
 
     ObjectSetInteger(0, text_obj_name, OBJPROP_CORNER, corner);
     ObjectSetInteger(0, icon_obj_name, OBJPROP_CORNER, corner);
@@ -2580,8 +2700,8 @@ void DrawPanelLine(int line_index, string text, string icon, color text_color, c
     ObjectSetInteger(0, icon_obj_name, OBJPROP_ANCHOR, anchor);
     ObjectSetInteger(0, text_obj_name, OBJPROP_FONTSIZE, font_size);
     ObjectSetInteger(0, icon_obj_name, OBJPROP_FONTSIZE, font_size);
-    ObjectSetInteger(0, text_obj_name, OBJPROP_YDISTANCE, y_pos);
-    ObjectSetInteger(0, icon_obj_name, OBJPROP_YDISTANCE, y_pos);
+    ObjectSetInteger(0, text_obj_name, OBJPROP_YDISTANCE, y_pos); // 計算済みのY座標を直接設定
+    ObjectSetInteger(0, icon_obj_name, OBJPROP_YDISTANCE, y_pos); // 計算済みのY座標を直接設定
     ObjectSetString(0, text_obj_name, OBJPROP_TEXT, text);
     ObjectSetString(0, icon_obj_name, OBJPROP_TEXT, icon);
     ObjectSetInteger(0, text_obj_name, OBJPROP_COLOR, text_color);
@@ -3619,35 +3739,6 @@ string ObiMacdToString(const DaijunkanMACDValues &macd)
 }
 
 //+------------------------------------------------------------------+
-//| 取引バイアスをパネル表示用の文字列と色に変換する
-//+------------------------------------------------------------------+
-void MasterStateToBias(ENUM_TRADE_BIAS bias, ENUM_BIAS_PHASE phase, string &bias_text, string &phase_text, string &bias_icon, color &bias_color)
-{
-    bias_icon = "■";
-    bias_color = clrGray;
-
-    switch(bias)
-    {
-        case BIAS_CORE_TREND_BUY:   bias_text = "コアトレンド (買)"; bias_icon = "▲"; bias_color = clrLimeGreen; break;
-        case BIAS_CORE_TREND_SELL:  bias_text = "コアトレンド (売)"; bias_icon = "▼"; bias_color = clrRed; break;
-        case BIAS_PULLBACK_BUY:     bias_text = "プルバック (買)";   bias_icon = "△"; bias_color = clrLightGreen;break;
-        case BIAS_PULLBACK_SELL:    bias_text = "プルバック (売)";   bias_icon = "▽"; bias_color = clrSalmon;    break;
-        case BIAS_EARLY_ENTRY_BUY:  bias_text = "アーリー (買)";     bias_icon = "▲"; bias_color = clrDeepSkyBlue;break;
-        case BIAS_EARLY_ENTRY_SELL: bias_text = "アーリー (売)";     bias_icon = "▼"; bias_color = clrHotPink;   break;
-        case BIAS_RANGE_TRADE:      bias_text = "レンジ";             bias_icon = "■"; bias_color = clrGainsboro; break;
-        default:                    bias_text = "不明"; break;
-    }
-    
-    switch(phase)
-    {
-        case PHASE_INITIATING:  phase_text = "[初期]"; break;
-        case PHASE_PROGRESSING: phase_text = "[進行中]";   break;
-        case PHASE_MATURING:    phase_text = "[成熟/準備]";break;
-        default:                phase_text = "";           break;
-    }
-}
-
-//+------------------------------------------------------------------+
 //| チャート上の有効なエントリーシグナルの有無と名前をチェックする
 //+------------------------------------------------------------------+
 void CheckActiveEntrySignals(bool &buy_trigger, bool &sell_trigger, string &buy_signal_name, string &sell_signal_name)
@@ -3966,7 +4057,7 @@ datetime FindLineOriginTime(double current_line_price, int buffer_index)
 }
 
 //+------------------------------------------------------------------+
-//| 【新規追加】RSIとMAのクロスをチェックしてエントリーを試みる
+//| RSIとMAのクロスをチェックしてエントリーを試みる (優勢フィルター版)
 //+------------------------------------------------------------------+
 void CheckRsiMaSignal()
 {
@@ -3974,7 +4065,7 @@ void CheckRsiMaSignal()
     if(!Inp_RSI_EnableLogic) return;
 
     // --- 1. 必要なデータを準備 ---
-    int data_size = Inp_RSI_MAPeriod + 2; // MA計算に必要な期間 + クロス確認用の期間
+    int data_size = Inp_RSI_MAPeriod + 2;
     double rsi_buffer[];
     if(ArrayResize(rsi_buffer, data_size) < 0) return;
     if(CopyBuffer(h_rsi, 0, 0, data_size, rsi_buffer) < data_size)
@@ -3985,7 +4076,7 @@ void CheckRsiMaSignal()
     ArraySetAsSeries(rsi_buffer, true); // 0が最新の足になるように
 
     // --- 2. RSIの移動平均を計算 ---
-    double rsi_ma_current = 0; // 最新の足のRSI MA値
+    double rsi_ma_current = 0;
     for(int i = 0; i < Inp_RSI_MAPeriod; i++)
     {
         rsi_ma_current += rsi_buffer[i];
@@ -4016,15 +4107,22 @@ void CheckRsiMaSignal()
 
     // --- 4. フィルター条件をチェックしてエントリー ---
     string signal_name = "";
-    
     // BUYエントリー
     if(buy_signal)
     {
         signal_name = "RsiMa_Buy";
         PrintFormat("ログ: 新規ロジックBUYシグナル検知 (%s)", signal_name);
         
-        // バイアスフィルター
-        bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_CORE_TREND_BUY || g_env_state.current_trade_bias == BIAS_EARLY_ENTRY_BUY);
+        // --- ▼▼▼ ここを修正 ▼▼▼ ---
+        // バイアスフィルター (全ての「買い優勢」バイアスで許可)
+        bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY ||
+                              g_env_state.current_trade_bias == BIAS_SHAKEOUT_BUY ||
+                              g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY ||
+                              g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY ||
+                              g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY ||
+                              g_env_state.current_trade_bias == BIAS_CONFLICTING_PULLBACK_BUY);
+        // --- ▲▲▲ ここまで修正 ▲▲▲ ---
+                              
         if(!is_valid_bias)
         {
             PrintFormat("ログ: %s 見送り (理由: バイアス不一致)", signal_name);
@@ -4052,8 +4150,16 @@ void CheckRsiMaSignal()
         signal_name = "RsiMa_Sell";
         PrintFormat("ログ: 新規ロジックSELLシグナル検知 (%s)", signal_name);
 
-        // バイアスフィルター
-        bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_CORE_TREND_SELL || g_env_state.current_trade_bias == BIAS_EARLY_ENTRY_SELL);
+        // --- ▼▼▼ ここを修正 ▼▼▼ ---
+        // バイアスフィルター (全ての「売り優勢」バイアスで許可)
+        bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL ||
+                              g_env_state.current_trade_bias == BIAS_SHAKEOUT_SELL ||
+                              g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL ||
+                              g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL ||
+                              g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL ||
+                              g_env_state.current_trade_bias == BIAS_CONFLICTING_PULLBACK_SELL);
+        // --- ▲▲▲ ここまで修正 ▲▲▲ ---
+
         if(!is_valid_bias)
         {
             PrintFormat("ログ: %s 見送り (理由: バイアス不一致)", signal_name);
@@ -4075,3 +4181,82 @@ void CheckRsiMaSignal()
         }
     }
 }
+
+//+------------------------------------------------------------------+
+//| パネル表示用の新しいヘルパー関数群
+//+------------------------------------------------------------------+
+
+// ENUM_TRADE_BIASから「市場サイクル」の文字列を取得する
+string GetBiasCategoryToString(ENUM_TRADE_BIAS bias)
+{
+    switch(bias)
+    {
+        // 上昇トレンド
+        case BIAS_ALIGNED_EARLY_ENTRY_BUY:
+        case BIAS_SHAKEOUT_BUY:
+            return "📈 上昇トレンド（発生・初期）";
+        case BIAS_DOMINANT_CORE_TREND_BUY:
+        case BIAS_DOMINANT_PULLBACK_BUY:
+        case BIAS_ALIGNED_CORE_TREND_BUY:
+            return "🚀 上昇トレンド（本流・最盛期）";
+        case BIAS_CONFLICTING_PULLBACK_BUY:
+        case BIAS_TREND_EXHAUSTION_BUY:
+            return "⚠️ 上昇トレンド（警戒・終焉）";
+
+        // 下降トレンド
+        case BIAS_ALIGNED_EARLY_ENTRY_SELL:
+        case BIAS_SHAKEOUT_SELL:
+            return "📉 下降トレンド（発生・初期）";
+        case BIAS_DOMINANT_CORE_TREND_SELL:
+        case BIAS_DOMINANT_PULLBACK_SELL:
+        case BIAS_ALIGNED_CORE_TREND_SELL:
+            return "🚀 下降トレンド（本流・最盛期）";
+        case BIAS_CONFLICTING_PULLBACK_SELL:
+        case BIAS_TREND_EXHAUSTION_SELL:
+            return "⚠️ 下降トレンド（警戒・終焉）";
+
+        // レンジ・転換
+        case BIAS_RANGE_BOUND:
+        case BIAS_RANGE_SQUEEZE:
+        case BIAS_RANGE_BREAKOUT_POTENTIAL_UP:
+        case BIAS_RANGE_BREAKOUT_POTENTIAL_DOWN:
+            return "🧘 転換・レンジ";
+
+        default:
+            return "❔ 分析不能";
+    }
+}
+
+// ENUM_TRADE_BIASから詳細な日本語名、アイコン、色を取得する
+void TradeBiasToString(ENUM_TRADE_BIAS bias, string &bias_text, string &bias_icon, color &bias_color)
+{
+    bias_icon = "■";
+    bias_color = clrGray;
+
+    switch(bias)
+    {
+        case BIAS_DOMINANT_CORE_TREND_BUY:   bias_text = "完全順行コアトレンド・買";   bias_icon = "🚀"; bias_color = clrLime; break;
+        case BIAS_DOMINANT_PULLBACK_BUY:     bias_text = "完全順行プルバック・買";     bias_icon = "🚀"; bias_color = clrLightGreen; break;
+        case BIAS_ALIGNED_CORE_TREND_BUY:    bias_text = "順張りコアトレンド・買";     bias_icon = "📈"; bias_color = clrPaleGreen; break;
+        case BIAS_ALIGNED_EARLY_ENTRY_BUY:   bias_text = "順張りアーリーエントリー・買"; bias_icon = "📈"; bias_color = clrLightSkyBlue; break;
+        case BIAS_SHAKEOUT_BUY:              bias_text = "シェイクアウト・買";         bias_icon = "✨"; bias_color = clrSpringGreen; break;
+        case BIAS_CONFLICTING_PULLBACK_BUY:  bias_text = "逆行プルバック・買";         bias_icon = "⚠️"; bias_color = clrKhaki; break;
+        case BIAS_TREND_EXHAUSTION_BUY:      bias_text = "トレンド枯渇・買";           bias_icon = "🏁"; bias_color = clrGold; break;
+
+        case BIAS_DOMINANT_CORE_TREND_SELL:  bias_text = "完全順行コアトレンド・売";   bias_icon = "🚀"; bias_color = clrRed; break;
+        case BIAS_DOMINANT_PULLBACK_SELL:    bias_text = "完全順行プルバック・売";     bias_icon = "🚀"; bias_color = clrTomato; break;
+        case BIAS_ALIGNED_CORE_TREND_SELL:   bias_text = "順張りコアトレンド・売";     bias_icon = "📉"; bias_color = clrSalmon; break;
+        case BIAS_ALIGNED_EARLY_ENTRY_SELL:  bias_text = "順張りアーリーエントリー・売"; bias_icon = "📉"; bias_color = clrHotPink; break;
+        case BIAS_SHAKEOUT_SELL:             bias_text = "シェイクアウト・売";         bias_icon = "✨"; bias_color = clrIndianRed; break;
+        case BIAS_CONFLICTING_PULLBACK_SELL: bias_text = "逆行プルバック・売";         bias_icon = "⚠️"; bias_color = clrDarkSalmon; break;
+        case BIAS_TREND_EXHAUSTION_SELL:     bias_text = "トレンド枯渇・売";           bias_icon = "🏁"; bias_color = clrMediumPurple; break;
+
+        case BIAS_RANGE_BOUND:               bias_text = "レンジ・方向感なし";        bias_icon = "🧘"; bias_color = clrGainsboro; break;
+        case BIAS_RANGE_SQUEEZE:             bias_text = "レンジ・収縮";              bias_icon = "🧘"; bias_color = clrSlateGray; break;
+        case BIAS_RANGE_BREAKOUT_POTENTIAL_UP: bias_text = "ブレイク期待・上";        bias_icon = "🧘"; bias_color = clrLightGreen; break;
+        case BIAS_RANGE_BREAKOUT_POTENTIAL_DOWN: bias_text = "ブレイク期待・下";      bias_icon = "🧘"; bias_color = clrLightPink; break;
+
+        default:                             bias_text = "不明確";                   bias_icon = "❔"; bias_color = clrGray; break;
+    }
+}
+

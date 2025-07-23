@@ -259,6 +259,13 @@ struct LineState
     datetime breakTime;
 };
 
+// スイングの頂点情報（時間と価格）を保持する構造体
+struct SwingPoint
+{
+    datetime time;
+    double   price;
+};
+
 // 互換性のために残す古い構造体（最終的に削除予定）
 struct ScoreComponentInfo { int total_score; };
 
@@ -372,7 +379,8 @@ input int    InpHighScoreThreshold  = 8;      // 高スコアと判断する閾�
 input bool   InpEnableEntrySpacing  = true;   // ポジション間隔フィルターを有効にする
 input double InpEntrySpacingPips    = 10.0;   // 最低限確保するポジション間隔 (pips)
 input int    InpMagicNumber         = 123456; // マジックナンバー
-input int    InpSignalExpiryBars    = 1;      // シグナルの有効期限 (バーの本数)
+input int    InpSignalEntryExpiryBars  = 3;      // シグナルの【エントリー】有効期限 (バーの本数)
+input int    InpSignalVisualExpiryBars = 100;    // シグナルの【表示】有効期限 (バーの本数, 0で実質無期限)
 
 enum ENUM_SL_MODE { SL_MODE_MANUAL, SL_MODE_OPPOSITE_TP };
 input group "=== ストップロス設定 ===";
@@ -439,6 +447,7 @@ input int               p_panel_y_offset    = 130;            // パネルY位�
 input int               InpPanelFontSize    = 14;             // パネルのフォントサイズ
 input int               InpPanelIconGapRight= 30;             // ? [右揃え用] アイコンとテキストの間隔
 input bool              InpEnableButtons    = true;           // ボタン表示を有効にする
+input bool   InpSwing_VisualizeSwings  = true;    // 参照スイングをチャートに描画する
 
 input group "=== オブジェクトとシグナルの外観 ===";
 input string InpLinePrefix_Pivot     = "Pivot_";     // ピボットラインプレフィックス
@@ -475,6 +484,8 @@ int h_atr_sl, zigzagHandle;
 int h_atr_slope; 
 int h_turning_point = INVALID_HANDLE;
 int h_rsi; // ← この行を追加
+int h_zigzag_swing[ENUM_TIMEFRAMES_COUNT]; // スイング分析用ZigZagハンドル
+int h_atr_swing[ENUM_TIMEFRAMES_COUNT];    // スイング分析用ATRハンドル
 
 // MTF対応のインジケーターハンドル配列
 int h_gc_ma_short_mtf[ENUM_TIMEFRAMES_COUNT];
@@ -486,6 +497,9 @@ int h_atr_slope_mtf[ENUM_TIMEFRAMES_COUNT]; // 各時間足用の傾き正規化
 EnvironmentState g_env_state;
 LineState        g_lineStates[];
 Line             allLines[];
+SwingPoint g_prev_swing_start[ENUM_TIMEFRAMES_COUNT];  // 前のスイングの始点
+SwingPoint g_prev_swing_end[ENUM_TIMEFRAMES_COUNT];    // 前のスイングの終点
+SwingPoint g_curr_swing_start[ENUM_TIMEFRAMES_COUNT];  // 現在のスイングの始点（＝前のスイングの終点）
 PositionInfo     g_managedPositions[];
 PositionGroup    buyGroup;
 PositionGroup    sellGroup;
@@ -594,6 +608,7 @@ void ClearSignalObjects();
 void ClearManualLines();
 void DeleteAllEaObjects();
 void DeleteGroupSplitLines(PositionGroup &group);
+string GetSwingRatioInfo(int tf_index, color &out_color);
 
 
 // --- その他ヘルパー ---
@@ -611,17 +626,15 @@ double GetConversionRate(string from_currency, string to_currency);
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数
+//| エキスパート初期化関数 (ZigZagハンドル統一版)
 //+------------------------------------------------------------------+
 int OnInit()
 {
-    // --- 基本設定 ---
     g_pip = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * pow(10, _Digits % 2);
     g_lastBarTime = 0;
     lastTradeTime = 0;
     g_lastPivotDrawTime = 0;
 
-    // 外部インジケーターの使用がONの場合のみ初期化
     if(InpUseExternalIndicator)
     {
         h_turning_point = iCustom(
@@ -637,45 +650,53 @@ int OnInit()
         }
     }
 
-    // --- MTF対応インジケーターハンドルの作成 ---
     ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
     mtf_periods[TF_CURRENT_INDEX]      = _Period;
     mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe;
     mtf_periods[TF_HIGHER_INDEX]       = InpHigherTimeframe;
+
     for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
     {
         h_gc_ma_short_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMAShortPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
         h_gc_ma_middle_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
         h_gc_ma_long_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
         h_atr_slope_mtf[i] = iATR(_Symbol, mtf_periods[i], InpSlopeAtrPeriod);
+        
+        // ▼▼▼ ここを修正 ▼▼▼
+        // TP計算用と同じパラメータ(InpZigzag...)でハンドルを作成する
+        h_zigzag_swing[i] = iCustom(_Symbol, mtf_periods[i], "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
+        // ▲▲▲ ここまで修正 ▲▲▲
+        
+        h_atr_swing[i]    = iATR(_Symbol, mtf_periods[i], InpSlopeAtrPeriod);
+        
         if(h_gc_ma_short_mtf[i] == INVALID_HANDLE || h_gc_ma_middle_mtf[i] == INVALID_HANDLE || 
-           h_gc_ma_long_mtf[i] == INVALID_HANDLE || h_atr_slope_mtf[i] == INVALID_HANDLE)
+           h_gc_ma_long_mtf[i] == INVALID_HANDLE || h_atr_slope_mtf[i] == INVALID_HANDLE ||
+           h_zigzag_swing[i] == INVALID_HANDLE || h_atr_swing[i] == INVALID_HANDLE)
         {
             PrintFormat("MTFインジケータハンドル (%s) の作成に失敗しました。", EnumToString(mtf_periods[i]));
             return(INIT_FAILED);
         }
     }
 
-    // --- その他のインジケーターハンドル ---
     if(InpStoch_UseDaiJunkan)
     {
         h_main_stoch = iStochastic(_Symbol, _Period, InpMainStoch_K_Period, InpMainStoch_D_Period, InpMainStoch_Slowing, MODE_SMA, STO_LOWHIGH);
         h_sub_stoch  = iStochastic(_Symbol, _Period, InpSubStoch_K_Period, InpSubStoch_D_Period, InpSubStoch_Slowing, MODE_SMA, STO_LOWHIGH);
     }
     h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
+    
+    // TP計算用のZigZagは元の "ZigZag" のまま
     zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
+
     h_macd_exec = iMACD(_Symbol, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE);
     h_macd_mid  = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, PERIOD_H4, 12, 26, 9, PRICE_CLOSE);
-
-    // ▼▼▼【ここから追加】RSIハンドルの作成 ▼▼▼
     h_rsi = iRSI(_Symbol, _Period, Inp_RSI_Period, PRICE_CLOSE);
     if(h_rsi == INVALID_HANDLE)
     {
         Print("RSIインジケータハンドルの作成に失敗しました。");
         return(INIT_FAILED);
     }
-    // ▲▲▲【追加ここまで】▲▲▲
     
     if((InpStoch_UseDaiJunkan && (h_main_stoch == INVALID_HANDLE || h_sub_stoch == INVALID_HANDLE)) || h_atr_sl == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE)
     {
@@ -694,7 +715,7 @@ int OnInit()
     prev_tp_timeframe = InpTP_Timeframe;
     if(InpShowInfoPanel) CreateInfoPanel();
 
-    Print("ApexFlowEA (最終安定版) 初期化完了");
+    Print("ApexFlowEA (市場サイクルモデル) 初期化完了");
     EventSetTimer(1);
     return(INIT_SUCCEEDED);
 }
@@ -806,6 +827,8 @@ void OnTimer()
        UpdateGroupSplitLines(buyGroup);
        UpdateGroupSplitLines(sellGroup);
        ManageZoneVisuals();
+       ManageSwingVisuals(); // スイング描画を追加
+
     }
     
     // 最後に一度だけチャートを再描画
@@ -2554,7 +2577,7 @@ double GetConversionRate(string from_currency, string to_currency)
 //|                                                                  |
 //+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
-//| 【パネル表示調整版】情報パネルの管理
+//| 【MTF詳細表示 修正版】情報パネルの管理
 //+------------------------------------------------------------------+
 void ManageInfoPanel()
 {
@@ -2575,12 +2598,9 @@ void ManageInfoPanel()
         case PC_RIGHT_LOWER: corner = CORNER_RIGHT_LOWER; anchor = ANCHOR_RIGHT; is_lower_corner = true; break;
     }
 
-    // --- 各行のフォントサイズとテキストを事前に準備 ---
     int sizes[];
     string texts[], icons[];
     color text_colors[], icon_colors[];
-
-    // --- 描画する内容を動的に配列へ格納 ---
     int line_count = 0;
     #define ADD_LINE(fs, txt, icn, tc, ic) \
         ArrayResize(sizes, line_count + 1); sizes[line_count] = fs; \
@@ -2590,11 +2610,9 @@ void ManageInfoPanel()
         ArrayResize(icon_colors, line_count + 1); icon_colors[line_count] = ic; \
         line_count++;
 
-    // --- パネル内容の定義 ---
     ADD_LINE(InpPanelFontSize, "▶ ApexFlowEA v7.2 (市場サイクルモデル)", "", clrWhite, clrNONE);
     ADD_LINE(InpPanelFontSize, "──────────────────", "", clrGainsboro, clrNONE);
     
-    // ▼▼▼ ラベルの色を clrWhite に変更 ▼▼▼
     string category_text = GetBiasCategoryToString(g_env_state.current_trade_bias);
     ADD_LINE(InpPanelFontSize, "市場サイクル: " + category_text, "", clrWhite, clrNONE);
 
@@ -2627,31 +2645,43 @@ void ManageInfoPanel()
     ENUM_TIMEFRAMES mtf_periods[ENUM_TIMEFRAMES_COUNT];
     mtf_periods[TF_CURRENT_INDEX] = _Period; mtf_periods[TF_INTERMEDIATE_INDEX] = InpIntermediateTimeframe; mtf_periods[TF_HIGHER_INDEX] = InpHigherTimeframe;
     for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++) {
-        // ▼▼▼ "PERIOD_" を削除する処理を追加 ▼▼▼
-        string tf_string_full = (i == TF_CURRENT_INDEX) ? EnumToString(_Period) : (i == TF_INTERMEDIATE_INDEX) ? EnumToString(InpIntermediateTimeframe) : EnumToString(InpHigherTimeframe);
+        string tf_string_full = EnumToString(mtf_periods[i]);
         StringReplace(tf_string_full, "PERIOD_", "");
         string tf_name = (i == TF_CURRENT_INDEX) ? tf_string_full + "(現)" : (i == TF_INTERMEDIATE_INDEX) ? tf_string_full + "(中)" : tf_string_full + "(高)";
-        
         color stage_color; string stage_text = MasterStateToString(g_env_state.mtf_master_state[i], stage_color);
         ADD_LINE(InpPanelFontSize, "  TF(" + tf_name + "): " + stage_text, "", stage_color, clrNONE);
-        ADD_LINE(InpPanelFontSize, "    ├ 長期MA: " + SlopeStateToString(g_env_state.mtf_slope_long[i]), "", clrWhite, clrNONE);
-        ADD_LINE(InpPanelFontSize, "    └ 帯MACD: " + ObiMacdToString(g_env_state.mtf_macd_values[i]), "", clrWhite, clrNONE);
+        
+        // ▼▼▼ 削除されていた2行をここに追加 ▼▼▼
+        string long_slope_text = SlopeStateToString(g_env_state.mtf_slope_long[i]);
+        ADD_LINE(InpPanelFontSize, "    ├ 長期MA: " + long_slope_text, "", clrWhite, clrNONE);
+        string obi_macd_status = ObiMacdToString(g_env_state.mtf_macd_values[i]);
+        ADD_LINE(InpPanelFontSize, "    └ 帯MACD: " + obi_macd_status, "", clrWhite, clrNONE);
+        // ▲▲▲ ここまで追加 ▲▲▲
     }
 
     ADD_LINE(InpPanelFontSize, "──────────────────", "", clrGainsboro, clrNONE);
-    ADD_LINE(InpPanelFontSize, "■ ポジション", "", clrGainsboro, clrNONE);
-    ADD_LINE(InpPanelFontSize, buyGroup.isActive ? StringFormat("BUY (%d): %.2f Lot (Avg: %.5f)", buyGroup.positionCount, buyGroup.totalLotSize, buyGroup.averageEntryPrice) : "BUY : ---", "", clrGainsboro, clrNONE);
-    ADD_LINE(InpPanelFontSize, sellGroup.isActive ? StringFormat("SELL(%d): %.2f Lot (Avg: %.5f)", sellGroup.positionCount, sellGroup.totalLotSize, sellGroup.averageEntryPrice) : "SELL: ---", "", clrGainsboro, clrNONE);
-    
+    ADD_LINE(InpPanelFontSize, "■ 現在のスイング情報", "", clrGainsboro, clrNONE);
+    for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++) {
+        ENUM_TIMEFRAMES tf_to_check;
+        if(i == TF_CURRENT_INDEX) tf_to_check = _Period;
+        else if(i == TF_INTERMEDIATE_INDEX) tf_to_check = InpIntermediateTimeframe;
+        else tf_to_check = InpHigherTimeframe;
+        
+        string tf_string_full = EnumToString(tf_to_check);
+        StringReplace(tf_string_full, "PERIOD_", "");
+        string tf_name = (i == TF_CURRENT_INDEX) ? tf_string_full + "(現)" : (i == TF_INTERMEDIATE_INDEX) ? tf_string_full + "(中)" : tf_string_full + "(高)";
+        color swing_info_color;
+        string swing_info = GetSwingRatioInfo(i, swing_info_color);
+        ADD_LINE(InpPanelFontSize, "  TF(" + tf_name + "): " + swing_info, "", swing_info_color, clrNONE);
+    }
+
     long time_remaining = (iTime(_Symbol, _Period, 0) + PeriodSeconds(_Period)) - TimeCurrent();
     if (time_remaining < 0) time_remaining = 0;
     ADD_LINE(InpPanelFontSize, StringFormat("Next Bar: %02d:%02d", time_remaining / 60, time_remaining % 60), "", clrGainsboro, clrNONE);
 
-    // --- Y座標の計算と描画実行 ---
     int current_y_pos = p_panel_y_offset;
     if(is_lower_corner)
     {
-        // 下コーナーの場合、全行の高さを合計し、一番上の行のY座標を決定
         int total_height = 0;
         for(int i = 0; i < line_count; i++) total_height += (int)round(sizes[i] * 1.5);
         current_y_pos += total_height;
@@ -2662,20 +2692,15 @@ void ManageInfoPanel()
         int y_step = (int)round(sizes[i] * 1.5);
         if(is_lower_corner)
         {
-            // 下コーナーの場合、次の行の座標を計算してから描画
             current_y_pos -= y_step;
         }
-        
         DrawPanelLine(i, current_y_pos, texts[i], icons[i], text_colors[i], icon_colors[i], corner, anchor, sizes[i]);
-        
         if(!is_lower_corner)
         {
-            // 上コーナーの場合、描画してから次の行の座標を計算
             current_y_pos += y_step;
         }
     }
     
-    // --- 余分な行をクリア ---
     for(int i = line_count; i < 50; i++) 
     {
         ObjectSetString(0, g_panelPrefix + "Text_" + (string)i, OBJPROP_TEXT, "");
@@ -3739,7 +3764,7 @@ string ObiMacdToString(const DaijunkanMACDValues &macd)
 }
 
 //+------------------------------------------------------------------+
-//| チャート上の有効なエントリーシグナルの有無と名前をチェックする
+//| チャート上の有効なエントリーシグナルの有無と名前をチェックする (分離版)
 //+------------------------------------------------------------------+
 void CheckActiveEntrySignals(bool &buy_trigger, bool &sell_trigger, string &buy_signal_name, string &sell_signal_name)
 {
@@ -3756,17 +3781,20 @@ void CheckActiveEntrySignals(bool &buy_trigger, bool &sell_trigger, string &buy_
         datetime objTime = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
         int bars_since_signal = iBarShift(_Symbol, _Period, objTime, false);
 
-        if(bars_since_signal > InpSignalExpiryBars) continue;
-
+        // ▼▼▼ ここを修正 ▼▼▼
+        // エントリーの有効期限だけをチェックする
+        if(bars_since_signal > InpSignalEntryExpiryBars) continue;
+        // ▲▲▲ ここまで修正 ▲▲▲
+        
         if(!buy_trigger && StringFind(name, "_Buy") > 0)
         {
             buy_trigger = true;
-            buy_signal_name = name; // 見つけたBUYシグナルの名前を格納
+            buy_signal_name = name;
         }
         if(!sell_trigger && StringFind(name, "_Sell") > 0)
         {
             sell_trigger = true;
-            sell_signal_name = name; // 見つけたSELLシグナルの名前を格納
+            sell_signal_name = name;
         }
         
         if(buy_trigger && sell_trigger) break;
@@ -3877,7 +3905,7 @@ void CreateInfoPanel()
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】有効期限切れのシグナルオブジェクトを自動で削除する
+//| 有効期限切れのシグナルオブジェクトを自動で削除する (分離版)
 //+------------------------------------------------------------------+
 void CleanupExpiredSignalObjects()
 {
@@ -3885,18 +3913,18 @@ void CleanupExpiredSignalObjects()
     for(int i = ObjectsTotal(0, -1, OBJ_ARROW) - 1; i >= 0; i--)
     {
         string name = ObjectName(0, i, -1, OBJ_ARROW);
-        
-        // EAが生成したシグナルオブジェクトか確認
         if(StringFind(name, InpArrowPrefix) == 0 || StringFind(name, InpDotPrefix) == 0)
         {
             datetime objTime = (datetime)ObjectGetInteger(0, name, OBJPROP_TIME, 0);
-            
-            // オブジェクトの時間が有効期限バー本数を超えているかチェック
             int bars_since_signal = iBarShift(_Symbol, _Period, objTime, false);
-            if(bars_since_signal >= InpSignalExpiryBars)
+            
+            // ▼▼▼ ここを修正 ▼▼▼
+            // 表示の有効期限だけをチェックする (0の場合は削除しない)
+            if(InpSignalVisualExpiryBars > 0 && bars_since_signal >= InpSignalVisualExpiryBars)
             {
-                ObjectDelete(0, name); // 期限切れのオブジェクトを削除
+                ObjectDelete(0, name);
             }
+            // ▲▲▲ ここまで修正 ▲▲▲
         }
     }
 }
@@ -4057,7 +4085,7 @@ datetime FindLineOriginTime(double current_line_price, int buffer_index)
 }
 
 //+------------------------------------------------------------------+
-//| RSIとMAのクロスをチェックしてエントリーを試みる (優勢フィルター版)
+//| RSIとMAのクロスをチェックしてエントリーを試みる (ロジック修正版)
 //+------------------------------------------------------------------+
 void CheckRsiMaSignal()
 {
@@ -4065,7 +4093,8 @@ void CheckRsiMaSignal()
     if(!Inp_RSI_EnableLogic) return;
 
     // --- 1. 必要なデータを準備 ---
-    int data_size = Inp_RSI_MAPeriod + 2;
+    // ▼▼▼ ロジック修正 ▼▼▼：2本前の足のデータも必要になるため、取得サイズを増やす
+    int data_size = Inp_RSI_MAPeriod + 3; 
     double rsi_buffer[];
     if(ArrayResize(rsi_buffer, data_size) < 0) return;
     if(CopyBuffer(h_rsi, 0, 0, data_size, rsi_buffer) < data_size)
@@ -4073,55 +4102,54 @@ void CheckRsiMaSignal()
         Print("RSIデータのコピーに失敗しました。");
         return;
     }
-    ArraySetAsSeries(rsi_buffer, true); // 0が最新の足になるように
+    ArraySetAsSeries(rsi_buffer, true);
 
     // --- 2. RSIの移動平均を計算 ---
-    double rsi_ma_current = 0;
-    for(int i = 0; i < Inp_RSI_MAPeriod; i++)
+    // ▼▼▼ ロジック修正 ▼▼▼：判定の主体である「1本前の足」を基準にMAを計算
+    double rsi_ma_previous = 0;
+    for(int i = 1; i < Inp_RSI_MAPeriod + 1; i++)
     {
-        rsi_ma_current += rsi_buffer[i];
+        rsi_ma_previous += rsi_buffer[i];
     }
-    rsi_ma_current /= Inp_RSI_MAPeriod;
+    rsi_ma_previous /= Inp_RSI_MAPeriod;
 
     // --- 3. エントリーシグナルをチェック ---
     bool buy_signal = false;
     bool sell_signal = false;
 
+    // ▼▼▼ ロジック修正 ▼▼▼：判定を[2]本前と[1]本前の足で行う
     // BUYシグナル条件
-    if(rsi_ma_current >= Inp_RSI_UpperLevel &&      // 1. MAが上限レベル以上
-       rsi_buffer[1] >= Inp_RSI_UpperLevel &&      // 2. 1本前のRSIが上限レベル以上
-       rsi_buffer[0] < Inp_RSI_UpperLevel)         // 3. 最新のRSIが上限レベルを下に抜けた
+    if(rsi_ma_previous >= Inp_RSI_UpperLevel &&      // 1. 1本前のMAが上限レベル以上
+       rsi_buffer[2] >= Inp_RSI_UpperLevel &&      // 2. 2本前のRSIが上限レベル以上
+       rsi_buffer[1] < Inp_RSI_UpperLevel)         // 3. 1本前のRSIが上限レベルを下に抜けた
     {
         buy_signal = true;
     }
 
     // SELLシグナル条件
-    if(rsi_ma_current <= Inp_RSI_LowerLevel &&      // 1. MAが下限レベル以下
-       rsi_buffer[1] <= Inp_RSI_LowerLevel &&      // 2. 1本前のRSIが下限レベル以下
-       rsi_buffer[0] > Inp_RSI_LowerLevel)         // 3. 最新のRSIが下限レベルを上に抜けた
+    if(rsi_ma_previous <= Inp_RSI_LowerLevel &&      // 1. 1本前のMAが下限レベル以下
+       rsi_buffer[2] <= Inp_RSI_LowerLevel &&      // 2. 2本前のRSIが下限レベル以下
+       rsi_buffer[1] > Inp_RSI_LowerLevel)         // 3. 1本前のRSIが下限レベルを上に抜けた
     {
         sell_signal = true;
     }
+    // ▲▲▲ ここまで修正 ▲▲▲
 
-    if(!buy_signal && !sell_signal) return; // シグナルがなければ終了
+    if(!buy_signal && !sell_signal) return;
 
     // --- 4. フィルター条件をチェックしてエントリー ---
     string signal_name = "";
-    // BUYエントリー
     if(buy_signal)
     {
         signal_name = "RsiMa_Buy";
         PrintFormat("ログ: 新規ロジックBUYシグナル検知 (%s)", signal_name);
         
-        // --- ▼▼▼ ここを修正 ▼▼▼ ---
-        // バイアスフィルター (全ての「買い優勢」バイアスで許可)
         bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY ||
                               g_env_state.current_trade_bias == BIAS_SHAKEOUT_BUY ||
                               g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY ||
                               g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY ||
                               g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY ||
                               g_env_state.current_trade_bias == BIAS_CONFLICTING_PULLBACK_BUY);
-        // --- ▲▲▲ ここまで修正 ▲▲▲ ---
                               
         if(!is_valid_bias)
         {
@@ -4129,14 +4157,13 @@ void CheckRsiMaSignal()
             return;
         }
         
-        // ゾーンフィルター
-        if(Inp_RSI_UseZoneFilter && !IsInValidZone(iTime(_Symbol, _Period, 0), true))
+        // ▼▼▼ ロジック修正 ▼▼▼：シグナルが発生した足（1本前の足）でゾーン判定
+        if(Inp_RSI_UseZoneFilter && !IsInValidZone(iTime(_Symbol, _Period, 1), true))
         {
             PrintFormat("ログ: %s 見送り (理由: 有効ゾーン外)", signal_name);
             return;
         }
 
-        // ポジション数フィルターとエントリー
         if(buyGroup.positionCount < InpMaxPositions)
         {
             MqlTick tick;
@@ -4144,21 +4171,17 @@ void CheckRsiMaSignal()
         }
     }
 
-    // SELLエントリー
     if(sell_signal)
     {
         signal_name = "RsiMa_Sell";
         PrintFormat("ログ: 新規ロジックSELLシグナル検知 (%s)", signal_name);
 
-        // --- ▼▼▼ ここを修正 ▼▼▼ ---
-        // バイアスフィルター (全ての「売り優勢」バイアスで許可)
         bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL ||
                               g_env_state.current_trade_bias == BIAS_SHAKEOUT_SELL ||
                               g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL ||
                               g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL ||
                               g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL ||
                               g_env_state.current_trade_bias == BIAS_CONFLICTING_PULLBACK_SELL);
-        // --- ▲▲▲ ここまで修正 ▲▲▲ ---
 
         if(!is_valid_bias)
         {
@@ -4166,14 +4189,13 @@ void CheckRsiMaSignal()
             return;
         }
         
-        // ゾーンフィルター
-        if(Inp_RSI_UseZoneFilter && !IsInValidZone(iTime(_Symbol, _Period, 0), false))
+        // ▼▼▼ ロジック修正 ▼▼▼：シグナルが発生した足（1本前の足）でゾーン判定
+        if(Inp_RSI_UseZoneFilter && !IsInValidZone(iTime(_Symbol, _Period, 1), false))
         {
             PrintFormat("ログ: %s 見送り (理由: 有効ゾーン外)", signal_name);
             return;
         }
         
-        // ポジション数フィルターとエントリー
         if(sellGroup.positionCount < InpMaxPositions)
         {
             MqlTick tick;
@@ -4260,3 +4282,158 @@ void TradeBiasToString(ENUM_TRADE_BIAS bias, string &bias_text, string &bias_ico
     }
 }
 
+//+------------------------------------------------------------------+
+//| 現在のスイングの進行状況を分析して文字列を返す (カラーリング機能付き)
+//+------------------------------------------------------------------+
+string GetSwingRatioInfo(int tf_index, color &out_color)
+{
+    // --- 初期化 ---
+    out_color = clrWhite; // デフォルトの色を白に設定
+    g_prev_swing_start[tf_index].time = 0;
+    g_prev_swing_end[tf_index].time = 0;
+    g_curr_swing_start[tf_index].time = 0;
+
+    // --- 1. ZigZagの転換点をバッファから取得 ---
+    double zigzag_buffer[];
+    int data_to_copy = 500; 
+    int copied = CopyBuffer(h_zigzag_swing[tf_index], 0, 0, data_to_copy, zigzag_buffer);
+    if(copied < 3)
+    {
+        return "---";
+    }
+    ArraySetAsSeries(zigzag_buffer, true);
+
+    // --- 2. 過去の転換点を最大10個までリストアップ ---
+    double swing_prices[];
+    int swing_bars[];
+    int swing_count = 0;
+    for(int i = 0; i < data_to_copy; i++)
+    {
+        if(zigzag_buffer[i] > 0)
+        {
+            ArrayResize(swing_prices, swing_count + 1);
+            ArrayResize(swing_bars, swing_count + 1);
+            swing_prices[swing_count] = zigzag_buffer[i];
+            swing_bars[swing_count] = i;
+            swing_count++;
+            if(swing_count >= 10) break;
+        }
+    }
+
+    if(swing_count < 3) return "データ不足";
+
+    // --- 3. 最新の転換点から遡り、「有効な」前のスイングを探す ---
+    double prev_swing_pips = 0;
+    int valid_prev_swing_start_index = -1;
+    
+    for(int i = 0; i < swing_count - 1; i++)
+    {
+        double p1 = swing_prices[i];
+        double p2 = swing_prices[i+1];
+        int bar_p2 = swing_bars[i+1];
+        double swing_size = MathAbs(p1 - p2);
+
+        double atr_buffer[];
+        if(CopyBuffer(h_atr_swing[tf_index], 0, bar_p2, 1, atr_buffer) > 0)
+        {
+            if(swing_size > (atr_buffer[0] * InpSwing_MinAtrMultiplier))
+            {
+                prev_swing_pips = (swing_size / _Point) / 10.0;
+                valid_prev_swing_start_index = i + 1;
+                break;
+            }
+        }
+    }
+
+    if(prev_swing_pips <= 0) return "有効スイングなし";
+
+    ENUM_TIMEFRAMES tf = (tf_index == 0) ? _Period : (tf_index == 1) ? InpIntermediateTimeframe : InpHigherTimeframe;
+    g_prev_swing_start[tf_index].price = swing_prices[valid_prev_swing_start_index];
+    g_prev_swing_start[tf_index].time  = iTime(_Symbol, tf, swing_bars[valid_prev_swing_start_index]);
+    
+    g_prev_swing_end[tf_index].price = swing_prices[valid_prev_swing_start_index - 1];
+    g_prev_swing_end[tf_index].time  = iTime(_Symbol, tf, swing_bars[valid_prev_swing_start_index - 1]);
+    
+    g_curr_swing_start[tf_index] = g_prev_swing_end[tf_index];
+
+    // --- 4. 現在のスイングと前の有効なスイングの比率を計算 ---
+    MqlTick tick;
+    if(!SymbolInfoTick(_Symbol, tick)) return "---";
+    double current_price = (tick.ask + tick.bid) / 2.0;
+    double latest_swing_price = g_curr_swing_start[tf_index].price;
+    
+    double current_swing_pips = (MathAbs(current_price - latest_swing_price) / _Point) / 10.0;
+    
+    if(prev_swing_pips < 0.1) return "計算不能 (ゼロ除算)";
+    double ratio = (current_swing_pips / prev_swing_pips) * 100.0;
+
+    // --- 5. 表示用の文字列を生成 & カラーリング ---
+    string direction = (current_price > latest_swing_price) ? "▲" : "▼";
+    
+    // ▼▼▼ カラーリングロジックを追加 ▼▼▼
+    if (ratio > 50.0)
+    {
+        if (direction == "▲") // 上昇方向のスイング
+        {
+            out_color = clrLime; // BUY優位性と同じ色
+        }
+        else // 下降方向のスイング
+        {
+            out_color = clrTomato; // SELL優位性と同じ色
+        }
+    }
+    // ▲▲▲ ここまで追加 ▲▲▲
+
+    return StringFormat("%s %.0f%% (現:%.1f / 前:%.1f pips)", direction, ratio, current_swing_pips, prev_swing_pips);
+}
+
+//+------------------------------------------------------------------+
+//| 参照しているスイングをチャートに描画する
+//+------------------------------------------------------------------+
+void ManageSwingVisuals()
+{
+    // --- 過去の描画を一旦すべて削除 ---
+    for(int i=0; i<ENUM_TIMEFRAMES_COUNT; i++)
+    {
+        ObjectDelete(0, "Swing_Prev_TF" + (string)i);
+        ObjectDelete(0, "Swing_Curr_TF" + (string)i);
+    }
+
+    // --- 設定がOFFならここで終了 ---
+    if(!InpSwing_VisualizeSwings) return;
+
+    // --- 現在のチャートの時間足に合致するスイング情報のみ描画 ---
+    int tf_index = -1;
+    if(_Period == _Period) tf_index = TF_CURRENT_INDEX;
+    if(_Period == InpIntermediateTimeframe) tf_index = TF_INTERMEDIATE_INDEX;
+    if(_Period == InpHigherTimeframe) tf_index = TF_HIGHER_INDEX;
+
+    if(tf_index != -1 && g_curr_swing_start[tf_index].time > 0)
+    {
+        // --- 前のスイングを描画 ---
+        string prev_name = "Swing_Prev_TF" + (string)tf_index;
+        if(ObjectCreate(0, prev_name, OBJ_TREND, 0, g_prev_swing_start[tf_index].time, g_prev_swing_start[tf_index].price, g_prev_swing_end[tf_index].time, g_prev_swing_end[tf_index].price))
+        {
+            ObjectSetInteger(0, prev_name, OBJPROP_COLOR, clrDodgerBlue);
+            ObjectSetInteger(0, prev_name, OBJPROP_STYLE, STYLE_DOT);
+            ObjectSetInteger(0, prev_name, OBJPROP_WIDTH, 2);
+            ObjectSetInteger(0, prev_name, OBJPROP_RAY_RIGHT, false);
+            ObjectSetInteger(0, prev_name, OBJPROP_SELECTABLE, false);
+        }
+
+        // --- 現在のスイングを描画 ---
+        string curr_name = "Swing_Curr_TF" + (string)tf_index;
+        MqlTick tick;
+        if(SymbolInfoTick(_Symbol, tick))
+        {
+            if(ObjectCreate(0, curr_name, OBJ_TREND, 0, g_curr_swing_start[tf_index].time, g_curr_swing_start[tf_index].price, TimeCurrent(), (tick.ask+tick.bid)/2.0))
+            {
+                ObjectSetInteger(0, curr_name, OBJPROP_COLOR, clrOrangeRed);
+                ObjectSetInteger(0, curr_name, OBJPROP_STYLE, STYLE_SOLID);
+                ObjectSetInteger(0, curr_name, OBJPROP_WIDTH, 1);
+                ObjectSetInteger(0, curr_name, OBJPROP_RAY_RIGHT, false);
+                ObjectSetInteger(0, curr_name, OBJPROP_SELECTABLE, false);
+            }
+        }
+    }
+}

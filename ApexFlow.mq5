@@ -1,12 +1,12 @@
 //+------------------------------------------------------------------+
 //|                 Git ApexFlowEA.mq5 (統合戦略モデル)                |
 //|               (傾斜ダイナミクス + 大循環MACD 先行指標)             |
-//|                         Version: 7.x (Full-Commented)            |
+//|                         Version: 8.x (Full-Commented)            |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "7.63"
-#property description "Ver7.63: build5200対応　パラメータ整理　パフォーマンス改善 MTFスイング分析実装　バイアス新定義、TP至近スキップ HTインジ対応　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
+#property version   "8.00"
+#property description "Ver8.00:エントリー指値逆指値監視MODE追加 build5200対応　パラメータ整理　パフォーマンス改善 MTFスイング分析実装　バイアス新定義、TP至近スキップ HTインジ対応　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
 
 //+------------------------------------------------------------------+
 //|                            定数定義                              |
@@ -149,6 +149,14 @@ enum ENUM_BIAS_PHASE
     PHASE_MATURING      // 後期、成熟/減速期、反転期、膠着期、準備期
 };
 
+// --- エントリー実行方式の定義 ---
+enum ENUM_ENTRY_EXECUTION_MODE
+{
+    MODE_INSTANT,     // シグナル即時エントリー
+    MODE_LIMIT,       // 押し目買いリミットオーダー
+    MODE_STOP,        // 勢い継続ストップオーダー
+    MODE_MONITOR      // 複数バー監視
+};
 
 // ==================================================================
 // --- データ保持構造 (struct) ---
@@ -269,18 +277,55 @@ struct SwingPoint
 // 互換性のために残す古い構造体（最終的に削除予定）
 struct ScoreComponentInfo { int total_score; };
 
+// --- 保留中のシグナル情報を保持する構造体 ---
+struct PendingSignalInfo
+{
+    bool     isValid;           // 有効なシグナルが保留中か
+    datetime signalTime;        // シグナル足の時間
+    double   signalHigh;        // シグナル足の高値
+    double   signalLow;         // シグナル足の安値
+    double   signalClose;       // シグナル足の終値
+    bool     isBuySignal;       // 買いシグナルか
+    string   signalName;        // シグナル名
+    int      expiryBars;        // シグナルの有効期限（バーの本数）
+};
+
 //+------------------------------------------------------------------+
-//|                     入力パラメータ (input) - 整理版                |
+//|                     入力パラメータ (input) - フィルター整理 最終版 |
 //+------------------------------------------------------------------+
 
 // ==================================================================
-// === ① 基本分析設定 ===
+// === ① エントリーロジック選択 ===
+// ==================================================================
+input group "--- エントリーロジックの有効化 ---";
+input bool Inp_Enable_PA_Indicator_Signal = true;     // 1. PA総合インジケーター (推奨)
+input bool Inp_Enable_Stochastic_Signal = true;     // 2. 大循環ストキャスティクス
+input bool Inp_Enable_RSI_Signal = true;            // 3. RSI MAクロス
+input bool Inp_Enable_PinBar_Signal_Internal = false; // 4. EA内蔵ピンバー (テスト用)
+
+input group "--- エントリー実行方式 ---";
+input ENUM_ENTRY_EXECUTION_MODE InpEntryExecutionMode = MODE_INSTANT; // エントリー実行の方式を選択
+
+// ==================================================================
+// === ② フィルター選択 ===
+// ==================================================================
+input group "--- フィルターの有効化 ---";
+input bool Inp_Enable_TradeBiasFilter = true;        // [最重要] 3MTF取引バイアスフィルターを有効にする
+input bool Inp_Enable_ScoreFilter = true;        // スコアフィルターを有効にする
+input bool Inp_Enable_RRR_Filter = true;         // リスクリワード比フィルターを有効にする
+input bool Inp_Enable_UniversalZoneFilter = true;  // 共通ゾーンフィルターを有効にする
+input group "--- フィルターの例外設定 ---";
+input bool InpAllowEntryOnScoreDiff   = true;  // [例外] バイアス不一致でもスコア差でエントリーを許可
+input bool InpAllowRangeEntry         = true;  // [例外] レンジ相場でのエントリーを許可
+
+// ==================================================================
+// === ③ 基本分析設定 ===
 // ==================================================================
 input group "--- 大循環分析 (移動平均線) ---";
-input int               InpGCMAShortPeriod      = 5;         // 短期MAの期間
-input int               InpGCMAMiddlePeriod     = 20;        // 中期MAの期間
-input int               InpGCMALongPeriod       = 40;        // 長期MAの期間
-input ENUM_MA_METHOD    InpGCMAMethod           = MODE_EMA;  // MAの種別
+input int               InpGCMAShortPeriod      = 5;        // 短期MAの期間
+input int               InpGCMAMiddlePeriod     = 20;       // 中期MAの期間
+input int               InpGCMALongPeriod       = 40;       // 長期MAの期間
+input ENUM_MA_METHOD    InpGCMAMethod           = MODE_EMA; // MAの種別
 input ENUM_APPLIED_PRICE InpGCMAAppliedPrice    = PRICE_CLOSE;// MAの適用価格
 
 input group "--- 傾斜ダイナミクス (MAの傾き) ---";
@@ -299,92 +344,92 @@ input group "--- 外部インジケーター連携 ---";
 input bool InpUseExternalIndicator = true; // 外部インジケーター(HT_Turning_Point)を使用する
 
 // ==================================================================
-// === ② エントリーシグナル設定 ===
+// === ④ エントリーシグナル詳細設定 ===
 // ==================================================================
-input group "--- プライスアクション (ピンバー) ---";
-input bool   InpUsePriceActionSignal = true;   // プライスアクション・シグナルを有効にする
+// [シグナル1] PA総合インジケーターは、チャート上のインジケーターから直接設定します
+
+input group "--- [シグナル2] 大循環ストキャスティクス ---";
+input ENUM_STOCH_MODE   InpStoch_SignalMode      = MODE_EVERYWHERE; // シグナルモード (ゾーン内 or どこでも)
+input int               InpMainStoch_K_Period    = 20;     // メイン: %K期間
+input int               InpMainStoch_D_Period    = 3;      // メイン: %D期間
+input int               InpMainStoch_Slowing     = 3;      // メイン: スローイング
+input int               InpMainStoch_Upper_Level = 80;     // メイン: 上限レベル
+input int               InpMainStoch_Lower_Level = 20;     // メイン: 下限レベル
+input bool              InpStoch_UseFilters      = true;   // フィルター機能を有効にする
+input int               InpSubStoch_K_Period     = 40;     // サブ(フィルター用): %K期間
+input int               InpSubStoch_D_Period     = 3;      // サブ(フィルター用): %D期間
+input int               InpSubStoch_Slowing      = 3;      // サブ(フィルター用): スローイング
+
+input group "--- [シグナル3] RSI MAクロス ---";
+input int    Inp_RSI_Period      = 14;     // RSIの期間
+input int    Inp_RSI_MAPeriod    = 5;      // RSIの移動平均期間
+input double Inp_RSI_UpperLevel  = 60.0;   // RSIの上限レベル
+input double Inp_RSI_LowerLevel  = 40.0;   // RSIの下限レベル
+input ENUM_MA_METHOD Inp_RSI_MAMethod = MODE_EMA; // RSIの移動平均の種別
+input bool   Inp_RSI_UseZoneFilter      = true; // (RSIロジック用) ゾーンフィルターを使用する
+
+input group "--- [シグナル4] EA内蔵ピンバー (テスト用) ---";
 input double InpPinbarBodyRatio      = 0.33; // ピンバーの定義: 実体が全体の何割以下か
 input double InpPinbarWickRatio      = 2.0;  // ピンバーの定義: 長いヒゲが実体の何倍以上か
 
-input group "--- 大循環ストキャスティクス ---";
-input bool              InpStoch_UseDaiJunkan    = true;            // 大循環ストキャスを有効にする
-input ENUM_STOCH_MODE   InpStoch_SignalMode      = MODE_EVERYWHERE; // シグナルモード (ゾーン内 or どこでも)
-input int               InpMainStoch_K_Period    = 20;              // メイン: %K期間
-input int               InpMainStoch_D_Period    = 3;               // メイン: %D期間
-input int               InpMainStoch_Slowing     = 3;               // メイン: スローイング
-input int               InpMainStoch_Upper_Level = 80;              // メイン: 上限レベル
-input int               InpMainStoch_Lower_Level = 20;              // メイン: 下限レベル
-input bool              InpStoch_UseFilters      = true;            // フィルター機能を有効にする
-input int               InpSubStoch_K_Period     = 40;              // サブ(フィルター用): %K期間
-input int               InpSubStoch_D_Period     = 3;               // サブ(フィルター用): %D期間
-input int               InpSubStoch_Slowing      = 3;               // サブ(フィルター用): スローイング
-
-input group "--- RSI MAクロス ---";
-input bool   Inp_RSI_EnableLogic = true;      // このロジックを有効にする
-input int    Inp_RSI_Period      = 14;      // RSIの期間
-input int    Inp_RSI_MAPeriod    = 5;       // RSIの移動平均期間
-input double Inp_RSI_UpperLevel  = 60.0;    // RSIの上限レベル
-input double Inp_RSI_LowerLevel  = 40.0;    // RSIの下限レベル
-input ENUM_MA_METHOD Inp_RSI_MAMethod = MODE_EMA; // RSIの移動平均の種別
-
-input group "--- ダイバージェンス ---";
+input group "--- ダイバージェンス (表示のみ) ---";
 input bool   InpShowDivergenceSignals = true;        // ダイバージェンスサインを表示するか
 input color  InpBullishDivColor       = clrDeepSkyBlue; // 強気ダイバージェンスの色
-input color  InpBearishDivColor       = clrHotPink;   // 弱気ダイバージェンスの色
+input color  InpBearishDivColor       = clrHotPink;     // 弱気ダイバージェンスの色
 
 // ==================================================================
-// === ③ エントリーロジック & フィルター ===
+// === ⑤ エントリーフィルター詳細設定 ===
 // ==================================================================
-input group "--- エントリーモード & 共通フィルター ---";
+input group "--- スコアフィルター詳細 ---";
+input int    InpEntryScore              = 5;     // エントリーに必要な最低スコア
+input int    InpMinScoreDiffForEntry    = 25;    // スコア差オーバーライドに必要な最低スコア差
+
+input group "--- RRRフィルター詳細 ---";
+input double InpEntry_MinRewardRiskRatio= 1.2;  // エントリーの最低リスクリワード比率 (RRR)
+
+input group "--- 共通ゾーンフィルター詳細 ---";
 enum ENTRY_MODE { TOUCH_MODE, ZONE_MODE };
-input ENTRY_MODE      InpEntryMode               = ZONE_MODE; // エントリーモード
-input bool            InpAllowRangeEntry         = true;      // レンジ相場でのエントリーを許可する
-input bool            InpBreakMode               = true;      // (タッチモード用) ブレイクをシグナルと見なす
-input bool            InpAllowSignalAfterBreak   = true;      // (タッチモード用) ブレイク後の再シグナルを許可
-input double          InpZonePips                = 50.0;      // ゾーン幅 (pips)
-input bool            InpEnableZoneMacdCross     = true;      // (ゾーンモード限定) ゾーン内MACDクロスでエントリー
-input double          InpEntry_MinRewardRiskRatio= 1.2;      // エントリーの最低リスクリワード比率 (RRR)
-input bool            InpUseUniversalZoneFilter  = true;      // 全シグナル共通のゾーン・フィルターを有効にする
-input bool            InpZoneFilter_UseStatic    = true;      // フィルター: 静的ゾーン(ピボット/手動ライン)
-input bool            InpZoneFilter_UseMA        = true;      // フィルター: 動的ゾーン(MAバンド)
-input bool            Inp_RSI_UseZoneFilter      = true;      // (RSIロジック用) ゾーンフィルターを使用する
+input ENTRY_MODE      InpEntryMode               = ZONE_MODE;  // エントリーモード
+input bool            InpBreakMode               = true;       // (タッチモード用) ブレイクをシグナルと見なす
+input bool            InpAllowSignalAfterBreak   = true;       // (タッチモード用) ブレイク後の再シグナルを許可
+input double          InpZonePips                = 50.0;       // ゾーン幅 (pips)
+input bool            InpEnableZoneMacdCross     = true;       // (ゾーンモード限定) ゾーン内MACDクロスでエントリー
+input bool            InpZoneFilter_UseStatic    = true;       // フィルター対象: 静的ゾーン(ピボット/手動ライン)
+input bool            InpZoneFilter_UseMA        = true;       // フィルター対象: 動的ゾーン(MAバンド)
 
-input group "--- MTFスコアリング ---";
-input int    InpEntryScore              = 5;       // エントリーの最低スコア
-input bool   InpAllowEntryOnScoreDiff   = true;    // バイアス不一致でもスコア差でエントリーを許可する
-input int    InpMinScoreDiffForEntry    = 25;      // ↑を許可する場合のエントリーに必要な最低スコア差
-input int    InpWeightCurrentTF         = 10;      // 執行時間足のスコア重み付け
-input int    InpWeightIntermediateTF    = 15;      // 中間時間足のスコア重み付け
-input int    InpWeightHigherTF          = 20;      // 上位時間足のスコア重み付け
-input int    InpScore_State_Confirmed   = 10;      // [スコア] 状態: 本物 (1-B, 4-B)
-input int    InpScore_State_Rejection   = 9;       // [スコア] 状態: 失敗/拒絶 (3-Rej, 6-Rej)
-input int    InpScore_State_Nascent     = 7;       // [スコア] 状態: 予兆 (1-A, 4-A)
-input int    InpScore_State_Pullback    = 6;       // [スコア] 状態: 押し目/戻り (2-Pull, 5-Rally)
-input int    InpScore_State_Transition  = 5;       // [スコア] 状態: 移行中 (6-TransUp, 3-TransDown)
-input int    InpScore_State_Mature      = 3;       // [スコア] 状態: 成熟 (1-C, 4-C)
-input int    InpScore_Slope_Long_Strong = 4;       // [スコア] 長期MA傾き: 強い
-input int    InpScore_Slope_Long_Weak   = 2;       // [スコア] 長期MA傾き: 弱い
-input int    InpScore_Slope_Short       = 2;       // [スコア] 短期MA傾き (執行足のみ)
-input int    InpScore_MACD_Cross        = 5;       // [スコア] 帯MACDクロス (GC/DC)
-input int    InpScore_MACD_Momentum     = 3;       // [スコア] 帯MACDモメンタム
-input int    InpBias_ScoreDiff_Dominant = 30;      // [バイアス] 優位性と判断するスコア差
-input int    InpBias_Score_Range        = 20;      // [バイアス] レンジと判断するスコア閾値
+input group "--- MTFスコアリング詳細 (フィルターとは別) ---";
+input int    InpWeightCurrentTF         = 10;    // 執行時間足のスコア重み付け
+input int    InpWeightIntermediateTF    = 15;    // 中間時間足のスコア重み付け
+input int    InpWeightHigherTF          = 20;    // 上位時間足のスコア重み付け
+input int    InpScore_State_Confirmed   = 10;    // [スコア] 状態: 本物 (1-B, 4-B)
+input int    InpScore_State_Rejection   = 9;     // [スコア] 状態: 失敗/拒絶 (3-Rej, 6-Rej)
+input int    InpScore_State_Nascent     = 7;     // [スコア] 状態: 予兆 (1-A, 4-A)
+input int    InpScore_State_Pullback    = 6;     // [スコア] 状態: 押し目/戻り (2-Pull, 5-Rally)
+input int    InpScore_State_Transition  = 5;     // [スコア] 状態: 移行中 (6-TransUp, 3-TransDown)
+input int    InpScore_State_Mature      = 3;     // [スコア] 状態: 成熟 (1-C, 4-C)
+input int    InpScore_Slope_Long_Strong = 4;     // [スコア] 長期MA傾き: 強い
+input int    InpScore_Slope_Long_Weak   = 2;     // [スコア] 長期MA傾き: 弱い
+input int    InpScore_Slope_Short       = 2;     // [スコア] 短期MA傾き (執行足のみ)
+input int    InpScore_MACD_Cross        = 5;     // [スコア] 帯MACDクロス (GC/DC)
+input int    InpScore_MACD_Momentum     = 3;     // [スコア] 帯MACDモメンタム
+input int    InpBias_ScoreDiff_Dominant = 30;    // [バイアス] 優位性と判断するスコア差
+input int    InpBias_Score_Range        = 20;    // [バイアス] レンジと判断するスコア閾値
 
 input group "--- シグナル有効期限 ---";
 input int InpSignalEntryExpiryBars  = 3;    // シグナルの【エントリー】有効期限 (バーの本数)
 input int InpSignalVisualExpiryBars = 100;  // シグナルの【表示】有効期限 (バーの本数, 0で実質無期限)
-input int InpRetestExpiryBars     = 10;     // ブレイク後のリテスト有効期限 (バーの本数)
+input int InpRetestExpiryBars     = 10;   // ブレイク後のリテスト有効期限 (バーの本数)
 
 // ==================================================================
-// === ④ 資金・ポジション管理 ===
+// === ⑥ 資金・ポジション管理 ===
 // ==================================================================
 input group "--- ロットサイズ設定 ---";
-input double InpLotSize              = 0.1;   // 基本ロットサイズ
-input bool   InpEnableRiskBasedLot   = true;  // リスクベースの自動ロット計算を有効にする
-input double InpRiskPercent          = 1.0;   // 1トレードあたりのリスク許容率 (%)
+input double InpLotSize              = 0.1;  // 基本ロットサイズ
+input bool   InpEnableRiskBasedLot   = true; // リスクベースの自動ロット計算を有効にする
+input double InpRiskPercent          = 1.0;  // 1トレードあたりのリスク許容率 (%)
 input bool   InpEnableHighScoreRisk  = true;  // 高スコア時にリスクを変更する
-input double InpHighScoreRiskPercent = 2.0;   // 高スコア時のリスク許容率 (%)
-input int    InpHighScoreThreshold   = 8;     // 高スコアと判断する閾値
+input double InpHighScoreRiskPercent = 2.0;  // 高スコア時のリスク許容率 (%)
+input int    InpHighScoreThreshold   = 8;    // 高スコアと判断する閾値
 
 input group "--- ポジション設定 ---";
 input int    InpMagicNumber        = 123456; // マジックナンバー
@@ -393,7 +438,7 @@ input bool   InpEnableEntrySpacing = true;   // ポジション間隔フィル�
 input double InpEntrySpacingPips   = 10.0;   // 最低限確保するポジション間隔 (pips)
 
 // ==================================================================
-// === ⑤ 決済ロジック設定 ===
+// === ⑦ 決済ロジック設定 ===
 // ==================================================================
 input group "--- 利確 (TP) 設定 ---";
 input ENUM_TP_MODE    InpTPLineMode           = MODE_ZIGZAG; // TPラインの計算モード
@@ -407,21 +452,21 @@ input double          InpHighSchoreTpRratio   = 1.5;         // 高スコア時�
 
 input group "--- 損切 (SL) 設定 ---";
 enum ENUM_SL_MODE { SL_MODE_MANUAL, SL_MODE_OPPOSITE_TP };
-input ENUM_SL_MODE    InpSlMode              = SL_MODE_MANUAL;    // SLモード
-input double          InpAtrBufferMultiplier = 1.5;              // SLに加えるATRバッファーの倍率
-input ENUM_TIMEFRAMES InpAtrSlTimeframe      = PERIOD_H1;         // バッファー計算に使うATRの時間足
-input bool            InpEnableTrailingSL      = true;            // トレーリングSLを有効にする
-input double          InpTrailingAtrMultiplier = 2.0;              // トレーリングATRの倍率
+input ENUM_SL_MODE    InpSlMode              = SL_MODE_MANUAL; // SLモード
+input double          InpAtrBufferMultiplier = 1.5;           // SLに加えるATRバッファーの倍率
+input ENUM_TIMEFRAMES InpAtrSlTimeframe      = PERIOD_H1;      // バッファー計算に使うATRの時間足
+input bool            InpEnableTrailingSL      = true;         // トレーリングSLを有効にする
+input double          InpTrailingAtrMultiplier = 2.0;           // トレーリングATRの倍率
 
 input group "--- 動的決済 (自動イグジット) ---";
-input bool            InpExit_OnTrendEnd         = true;    // 決済ON/OFF: 執行足のトレンド終焉
-input bool            InpExit_OnCounterBias      = true;    // 決済ON/OFF: 反対バイアス発生
-input bool            InpExit_OnRange            = true;    // 決済ON/OFF: レンジ相場突入
-input bool            InpEnableCounterSignalExit = true;    // 決済ON/OFF: 反対スコア到達
-input int             InpCounterSignalScore      = 7;       // ↑のトリガーとなる反対シグナルの最低スコア
-input bool            InpEnableTimeExit          = true;    // 決済ON/OFF: 時間経過
-input int             InpExitAfterBars           = 48;      // 何本経過したら決済判断を行うか
-input double          InpExitMinProfit           = 1.0;     // この利益額(口座通貨)未満の場合、時間で決済される
+input bool            InpExit_OnTrendEnd         = true;       // 決済ON/OFF: 執行足のトレンド終焉
+input bool            InpExit_OnCounterBias      = true;       // 決済ON/OFF: 反対バイアス発生
+input bool            InpExit_OnRange            = true;       // 決済ON/OFF: レンジ相場突入
+input bool            InpEnableCounterSignalExit = true;       // 決済ON/OFF: 反対スコア到達
+input int             InpCounterSignalScore      = 7;          // ↑のトリガーとなる反対シグナルの最低スコア
+input bool            InpEnableTimeExit          = true;       // 決済ON/OFF: 時間経過
+input int             InpExitAfterBars           = 48;         // 何本経過したら決済判断を行うか
+input double          InpExitMinProfit           = 1.0;        // この利益額(口座通貨)未満の場合、時間で決済される
 enum ENUM_TIME_EXIT_ACTION { TIME_EXIT_CLOSE, TIME_EXIT_RESET_TP };
 input ENUM_TIME_EXIT_ACTION InpTimeExitAction = TIME_EXIT_CLOSE; // 時間経過時のアクション (決済 or TPリセット)
 
@@ -433,31 +478,31 @@ input double          InpProfitBE_Pips        = 2.0;              // 利益確�
 input double          InpExitBufferPips       = 1.0;              // 決済バッファ (Pips)
 
 // ==================================================================
-// === ⑥ UI・表示設定 ===
+// === ⑧ UI・表示設定 ===
 // ==================================================================
 input group "--- 情報パネル ---";
-input bool              InpShowInfoPanel     = true;           // 情報パネルを表示する
+input bool              InpShowInfoPanel     = true;         // 情報パネルを表示する
 input ENUM_PANEL_CORNER InpPanelCorner       = PC_RIGHT_LOWER; // パネルの表示コーナー
-input int               p_panel_x_offset     = 10;             // パネルX位置
-input int               p_panel_y_offset     = 130;            // パネルY位置
-input int               InpPanelFontSize     = 14;             // パネルのフォントサイズ
-input int               InpPanelIconGapRight = 30;             // [右揃え用] アイコンとテキストの間隔
-input int               InpScorePerSymbol    = 20;             // スコアバーの1●あたりの点数
-input bool              InpEnableButtons     = true;           // 決済・操作ボタンを表示する
+input int               p_panel_x_offset     = 10;           // パネルX位置
+input int               p_panel_y_offset     = 130;          // パネルY位置
+input int               InpPanelFontSize     = 14;           // パネルのフォントサイズ
+input int               InpPanelIconGapRight = 30;           // [右揃え用] アイコンとテキストの間隔
+input int               InpScorePerSymbol    = 20;           // スコアバーの1●あたりの点数
+input bool              InpEnableButtons     = true;         // 決済・操作ボタンを表示する
 
 input group "--- スイング分析表示 ---";
-input int    InpSwing_ZigzagDepth      = 12;    // ZigZag: Depth
-input int    InpSwing_ZigzagDeviation  = 5;     // ZigZag: Deviation
-input int    InpSwing_ZigzagBackstep   = 3;     // ZigZag: Backstep
-input double InpSwing_MinAtrMultiplier = 0.5;   // 分析対象とする最小スイングサイズ (ATR倍率)
-input bool   InpSwing_VisualizeSwings  = true;  // 参照スイングをチャートに描画する
+input int    InpSwing_ZigzagDepth      = 12;   // ZigZag: Depth
+input int    InpSwing_ZigzagDeviation  = 5;    // ZigZag: Deviation
+input int    InpSwing_ZigzagBackstep   = 3;    // ZigZag: Backstep
+input double InpSwing_MinAtrMultiplier = 0.5;  // 分析対象とする最小スイングサイズ (ATR倍率)
+input bool   InpSwing_VisualizeSwings  = true; // 参照スイングをチャートに描画する
 
 input group "--- ピボットライン表示 ---";
-input bool            InpUsePivotLines     = true;    // ピボTットラインを使用する
-input ENUM_TIMEFRAMES InpPivotPeriod       = PERIOD_H1; // ピボット時間足
-input bool            InpShowS2R2          = true;    // S2/R2ラインを表示
-input bool            InpShowS3R3          = true;    // S3/R3ラインを表示
-input int             InpPivotHistoryCount = 1;       // 表示する過去ピボットの数
+input bool            InpUsePivotLines     = true;       // ピボットラインを使用する
+input ENUM_TIMEFRAMES InpPivotPeriod       = PERIOD_H1;  // ピボット時間足
+input bool            InpShowS2R2          = true;       // S2/R2ラインを表示
+input bool            InpShowS3R3          = true;       // S3/R3ラインを表示
+input int             InpPivotHistoryCount = 1;        // 表示する過去ピボットの数
 
 input group "--- オブジェクト外観 ---";
 input bool   InpVisualizeZones         = true;           // ゾーンを可視化する
@@ -487,12 +532,10 @@ input int    InpZoneBounceBuyCode      = 241;            // ゾーンバウン�
 input int    InpZoneBounceSellCode     = 242;            // ゾーンバウンス(売り)のシンボル
 
 input group "--- 手動ライン外観 ---";
-input color           p_ManualSupport_Color = clrDodgerBlue; // 手動サポートラインの色
-input color           p_ManualResist_Color  = clrTomato;     // 手動レジスタンスラインの色
-input ENUM_LINE_STYLE p_ManualLine_Style    = STYLE_DOT;     // 手動ラインのスタイル
-input int             p_ManualLine_Width    = 2;             // 手動ラインの太さ
-
-//+------------------------------------------------------------------+
+input color           p_ManualSupport_Color = clrDodgerBlue;  // 手動サポートラインの色
+input color           p_ManualResist_Color  = clrTomato;      // 手動レジスタンスラインの色
+input ENUM_LINE_STYLE p_ManualLine_Style    = STYLE_DOT;      // 手動ラインのスタイル
+input int             p_ManualLine_Width    = 2;              // 手動ラインの太さ
 
 //+------------------------------------------------------------------+
 //|                     グローバル変数                               |
@@ -553,9 +596,15 @@ ENUM_TP_MODE    prev_tp_mode      = WRONG_VALUE;
 ENUM_TIMEFRAMES prev_tp_timeframe = WRONG_VALUE;
 
 // in グローバル変数セクション
-
 bool     g_buyGroupJustClosed = false;   // 買いグループが決済されたことを示すフラグ
 bool     g_sellGroupJustClosed = false;  // 売りグループが決済されたことを示すフラグ
+
+// --- 外部シグナルインジケーター用ハンドル ---
+int h_pa_signal_indicator = INVALID_HANDLE;
+
+// --- 状態管理 ---
+PendingSignalInfo g_pendingSignal; // 保留中のシグナル情報を格納するグローバル変数
+long g_pending_order_ticket = 0;   // 保留中のリミット/ストップ注文のチケット番号
 
 //+------------------------------------------------------------------+
 //|                   関数のプロトタイプ宣言                         |
@@ -572,7 +621,7 @@ void UpdateEnvironmentAnalysis();
 void CheckPriceActionSignal(); // ? この行を追加
 void CheckStateBasedExits();
 void CheckEntry();
-void PlaceOrder(bool isBuy, double price, int score);
+void PlaceOrder(bool isBuy, double price, int score, string signal_name);
 void CalculateOverallBiasAndScore(); // 【新規】この行を追加
 bool IsInValidZone(datetime signal_time, bool is_buy_signal); // ? この行を追加
 
@@ -642,6 +691,13 @@ void CleanupExpiredSignalObjects(); // ▼▼▼【この行を追加】▼▼�
 bool IsNewBar();
 double CalculateRiskBasedLotSize(int score);
 double GetConversionRate(string from_currency, string to_currency);
+void CheckUnifiedSignalEntry();
+// ---【新規追加】最終承認フィルターの宣言 ---
+bool CanPlaceOrder(bool is_buy, string signal_name, string source_system);
+// ---【新規追加】---
+void DetectEntrySignals();
+void ManagePendingEntry();
+void CancelPendingOrders();
 
 //+------------------------------------------------------------------+
 //|                                                                  |
@@ -652,7 +708,7 @@ double GetConversionRate(string from_currency, string to_currency);
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| エキスパート初期化関数 (ZigZagハンドル統一版)
+//| エキスパート初期化関数 (パラメータ名修正 最終版)
 //+------------------------------------------------------------------+
 int OnInit()
 {
@@ -667,7 +723,8 @@ int OnInit()
             _Symbol, _Period, "HT_Turning_Point_V1.030",
             19, 0, 16748574, 255, 0, 1000, 3.0, 2000, "", 1, 158, 158, "", 
             true, true, 1, 217, 218, 119, 119, true, 1, "ファイル名.wav", "", 
-            false, 6, "ファイル名.wav", false
+            false, 6, "ファイル名.wav", 
+            false
         );
         if(h_turning_point == INVALID_HANDLE)
         {
@@ -687,14 +744,9 @@ int OnInit()
         h_gc_ma_middle_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMAMiddlePeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
         h_gc_ma_long_mtf[i] = iMA(_Symbol, mtf_periods[i], InpGCMALongPeriod, 0, InpGCMAMethod, InpGCMAAppliedPrice);
         h_atr_slope_mtf[i] = iATR(_Symbol, mtf_periods[i], InpSlopeAtrPeriod);
-        
-        // ▼▼▼ ここを修正 ▼▼▼
-        // TP計算用と同じパラメータ(InpZigzag...)でハンドルを作成する
         h_zigzag_swing[i] = iCustom(_Symbol, mtf_periods[i], "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-        // ▲▲▲ ここまで修正 ▲▲▲
-        
         h_atr_swing[i]    = iATR(_Symbol, mtf_periods[i], InpSlopeAtrPeriod);
-        
+
         if(h_gc_ma_short_mtf[i] == INVALID_HANDLE || h_gc_ma_middle_mtf[i] == INVALID_HANDLE || 
            h_gc_ma_long_mtf[i] == INVALID_HANDLE || h_atr_slope_mtf[i] == INVALID_HANDLE ||
            h_zigzag_swing[i] == INVALID_HANDLE || h_atr_swing[i] == INVALID_HANDLE)
@@ -704,16 +756,13 @@ int OnInit()
         }
     }
 
-    if(InpStoch_UseDaiJunkan)
+    if(Inp_Enable_Stochastic_Signal)
     {
         h_main_stoch = iStochastic(_Symbol, _Period, InpMainStoch_K_Period, InpMainStoch_D_Period, InpMainStoch_Slowing, MODE_SMA, STO_LOWHIGH);
         h_sub_stoch  = iStochastic(_Symbol, _Period, InpSubStoch_K_Period, InpSubStoch_D_Period, InpSubStoch_Slowing, MODE_SMA, STO_LOWHIGH);
     }
     h_atr_sl = iATR(_Symbol, InpAtrSlTimeframe, 14);
-    
-    // TP計算用のZigZagは元の "ZigZag" のまま
     zigzagHandle = iCustom(_Symbol, InpTP_Timeframe, "ZigZag", InpZigzagDepth, InpZigzagDeviation, InpZigzagBackstep);
-
     h_macd_exec = iMACD(_Symbol, PERIOD_CURRENT, 12, 26, 9, PRICE_CLOSE);
     h_macd_mid  = iMACD(_Symbol, PERIOD_H1, 12, 26, 9, PRICE_CLOSE);
     h_macd_long = iMACD(_Symbol, PERIOD_H4, 12, 26, 9, PRICE_CLOSE);
@@ -724,9 +773,16 @@ int OnInit()
         return(INIT_FAILED);
     }
     
-    if((InpStoch_UseDaiJunkan && (h_main_stoch == INVALID_HANDLE || h_sub_stoch == INVALID_HANDLE)) || h_atr_sl == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE)
+    if((Inp_Enable_Stochastic_Signal && (h_main_stoch == INVALID_HANDLE || h_sub_stoch == INVALID_HANDLE)) || h_atr_sl == INVALID_HANDLE || zigzagHandle == INVALID_HANDLE || h_macd_exec == INVALID_HANDLE || h_macd_mid == INVALID_HANDLE || h_macd_long == INVALID_HANDLE)
     {
         Print("一部のインジケータハンドルの作成に失敗しました。");
+        return(INIT_FAILED);
+    }
+    
+    h_pa_signal_indicator = iCustom(_Symbol, _Period, "PriceAction_Unified_Signal");
+    if(h_pa_signal_indicator == INVALID_HANDLE)
+    {
+        Print("PriceAction_Unified_Signalの読み込みに失敗しました。先にインジケーターをチャートに適用してください。");
         return(INIT_FAILED);
     }
     
@@ -741,42 +797,53 @@ int OnInit()
     prev_tp_timeframe = InpTP_Timeframe;
     if(InpShowInfoPanel) CreateInfoPanel();
 
-    Print("ApexFlowEA (市場サイクルモデル) 初期化完了");
-    if(InpShowInfoPanel) UpdateInfoPanel_NewBar(); // ← この行を追加
+    Print("ApexFlowEA (PAシグナル統合モデル) 初期化完了");
+    if(InpShowInfoPanel) UpdateInfoPanel_NewBar();
     EventSetTimer(1);
     return(INIT_SUCCEEDED);
 }
 
 //+------------------------------------------------------------------+
-//| エキスパート終了処理関数
+//| エキスパート終了処理関数 (パラメータ名修正版)
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
     EventKillTimer();
     DeleteAllEaObjects();
-    
+
     for(int i = 0; i < ENUM_TIMEFRAMES_COUNT; i++)
     {
         IndicatorRelease(h_gc_ma_short_mtf[i]);
         IndicatorRelease(h_gc_ma_middle_mtf[i]);
         IndicatorRelease(h_gc_ma_long_mtf[i]);
         IndicatorRelease(h_atr_slope_mtf[i]);
+        IndicatorRelease(h_zigzag_swing[i]);
+        IndicatorRelease(h_atr_swing[i]);
     }
 
-    if(InpStoch_UseDaiJunkan)
+    // ---【ここを修正】古いパラメータ名を新しい名前に変更 ---
+    if(Inp_Enable_Stochastic_Signal)
     {
         IndicatorRelease(h_main_stoch);
         IndicatorRelease(h_sub_stoch);
     }
+    // ---【ここまで】---
+
     IndicatorRelease(h_atr_sl);
     IndicatorRelease(zigzagHandle);
     IndicatorRelease(h_macd_exec);
     IndicatorRelease(h_macd_mid);
     IndicatorRelease(h_macd_long);
-    
+    IndicatorRelease(h_rsi);
+
     if(h_turning_point != INVALID_HANDLE)
     {
         IndicatorRelease(h_turning_point);
+    }
+
+    if(h_pa_signal_indicator != INVALID_HANDLE) 
+    {
+        IndicatorRelease(h_pa_signal_indicator);
     }
 
     ChartRedraw();
@@ -784,22 +851,39 @@ void OnDeinit(const int reason)
 }
 
 //+------------------------------------------------------------------+
-//| エキスパートティック関数 (データ処理に専念)
+//| エキスパートティック関数 (エントリー実行ロジック分離版)
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    // 毎ティック必ず分析と決済チェックを行う
+    // --- データ準備完了チェック ---
+    int bars_needed = 250; 
+    if(SeriesInfoInteger(_Symbol, _Period, SERIES_BARS_COUNT) < bars_needed ||
+       SeriesInfoInteger(_Symbol, InpIntermediateTimeframe, SERIES_BARS_COUNT) < bars_needed ||
+       SeriesInfoInteger(_Symbol, InpHigherTimeframe, SERIES_BARS_COUNT) < bars_needed)
+    {
+        Comment("上位足のヒストリーデータを準備中です。しばらくお待ちください...");
+        return;
+    }
+    Comment(""); 
+
+    // --- 毎ティック必ず実行する処理 ---
     UpdateEnvironmentAnalysis();
+    
+    // ---【ここから変更】--- エントリー実行管理を毎ティック行う ---
+    ManagePendingEntry();
+    // ---【ここまで】---
+
     CheckStateBasedExits();
     CheckExitForGroup(buyGroup);
     CheckExitForGroup(sellGroup);
     ManageTrailingSL(buyGroup);
     ManageTrailingSL(sellGroup);
 
-    // 新しい足ができたタイミングでのみ実行する処理
+    // --- 新しい足ができたタイミングでのみ実行する処理 ---
     if(IsNewBar())
     {
-        if(InpShowInfoPanel) UpdateInfoPanel_NewBar(); // ← この行を追加
+        // 1. 表示・描画関連の更新
+        if(InpShowInfoPanel) UpdateInfoPanel_NewBar();
         ArrayFree(allLines);
         CleanupExpiredSignalObjects();
         ManageManualLines();
@@ -807,10 +891,11 @@ void OnTick()
         if(InpUseExternalIndicator) UpdateTurningPointLines();
         UpdateLines();
         ProcessLineSignals();
-        CheckStochasticSignal();
-        CheckPriceActionSignal();
-        CheckRsiMaSignal();        
-        CheckEntry();
+
+        // 2. エントリートリガーのシグナルを「検知」するだけ
+        DetectEntrySignals();
+        
+        // 3. ポジション情報の同期と管理
         SyncManagedPositions();
         ManagePositionGroups();
     }
@@ -1239,189 +1324,66 @@ void CheckStateBasedExits()
 }
 
 //+------------------------------------------------------------------+
-//| 新規エントリーを探す (スコア差オーバーライド機能付き)
+//| EA内蔵シグナルを「検知」する関数 (最終版)
 //+------------------------------------------------------------------+
 void CheckEntry()
 {
+    if(g_pendingSignal.isValid || buyGroup.isActive || sellGroup.isActive) return;
+
     bool buy_trigger = false;
     bool sell_trigger = false;
-    string found_buy_signal = "";
-    string found_sell_signal = "";
-    CheckActiveEntrySignals(buy_trigger, sell_trigger, found_buy_signal, found_sell_signal);
+    string found_buy_signal_raw = "";
+    string found_sell_signal_raw = "";
+    CheckActiveEntrySignals(buy_trigger, sell_trigger, found_buy_signal_raw, found_sell_signal_raw);
 
     if (!buy_trigger && !sell_trigger) return;
 
-    Print("-------------------- [エントリー診断] --------------------");
-    if(buy_trigger) PrintFormat("診断: BUYシグナル『%s』を検知しました。", found_buy_signal);
-    if(sell_trigger) PrintFormat("診断: SELLシグナル『%s』を検知しました。", found_sell_signal);
-
-    if (TimeCurrent() <= lastTradeTime + 5)
-    {
-        Print("診断結果: エントリー見送り (理由: 前回のトレードから5秒以内)");
-        Print("----------------------------------------------------------");
-        return;
-    }
-
     if(buy_trigger)
     {
-        PrintFormat("診断 (BUY): 現在の買いスコア = %d, 必要スコア = %d", g_env_state.total_buy_score, InpEntryScore);
-        if (g_env_state.total_buy_score < InpEntryScore)
+        string clean_signal_name = found_buy_signal_raw;
+        StringReplace(clean_signal_name, InpArrowPrefix, "");
+        StringReplace(clean_signal_name, "_", " ");
+        
+        if(CanPlaceOrder(true, clean_signal_name, "EA内蔵"))
         {
-            Print("診断結果 (BUY): エントリー見送り (理由: スコア不足)");
-        }
-        else
-        {
-            Print("診断 (BUY): スコア条件クリア");
-            bool is_buy_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY ||
-                                g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY ||
-                                g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY ||
-                                g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY ||
-                                g_env_state.current_trade_bias == BIAS_SHAKEOUT_BUY);
-            bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_BOUND);
-            
-            // ★★★ 新しいロジック: スコア差によるバイアス条件のオーバーライド ★★★
-            bool score_diff_override = InpAllowEntryOnScoreDiff && (g_env_state.total_buy_score - g_env_state.total_sell_score >= InpMinScoreDiffForEntry);
-
-            string bias_jp_text = ""; string temp_icon; color temp_color;
-            TradeBiasToString(g_env_state.current_trade_bias, bias_jp_text, temp_icon, temp_color);
-            PrintFormat("診断 (BUY): 現在の取引バイアス = %s", bias_jp_text);
-
-            if (!(is_buy_bias || range_entry_ok || score_diff_override))
+            MqlRates signal_bar[];
+            if(CopyRates(_Symbol, _Period, 1, 1, signal_bar) > 0)
             {
-                Print("診断結果 (BUY): エントリー見送り (理由: 取引バイアス不一致、かつスコア差も不足)");
-            }
-            else
-            {
-                if(score_diff_override && !(is_buy_bias || range_entry_ok))
-                {
-                   PrintFormat("診断 (BUY): バイアスは不一致ですが、スコア差(%d)が閾値(%d)を超えたためエントリー条件をオーバーライドします。", g_env_state.total_buy_score - g_env_state.total_sell_score, InpMinScoreDiffForEntry);
-                }
-                else
-                {
-                   Print("診断 (BUY): バイアス条件クリア");
-                }
-                
-                // ▼▼▼ ここからRRRフィルター ▼▼▼
-                MqlTick tick;
-                if(!SymbolInfoTick(_Symbol, tick)) return;
-                
-                double entry_price = tick.ask;
-                double sl_price = CalculateEntryStopLoss(true);
-                double tp_price = zonalFinalTPLine_Buy;
-                if(sl_price <= 0 || tp_price <= 0) {
-                    Print("診断結果 (BUY): エントリー見送り (理由: RRR計算用のSL/TP価格が無効です)");
-                } else {
-                    double risk_distance = MathAbs(entry_price - sl_price);
-                    double reward_distance = MathAbs(tp_price - entry_price);
-
-                    if(risk_distance < _Point) {
-                        Print("診断結果 (BUY): エントリー見送り (理由: リスク値が0のためRRR計算不能)");
-                    } else {
-                        double rrr = reward_distance / risk_distance;
-                        PrintFormat("診断 (BUY): RRR = %.2f (リワード:%.5f / リスク:%.5f), 最低RRR = %.2f", rrr, reward_distance, risk_distance, InpEntry_MinRewardRiskRatio);
-                        if(rrr < InpEntry_MinRewardRiskRatio) {
-                            Print("診断結果 (BUY): エントリー見送り (理由: リスクリワード比が不足)");
-                        } else {
-                            Print("診断 (BUY): RRR条件クリア");
-                            // ▲▲▲ RRRフィルターここまで ▲▲▲
-
-                            if (buyGroup.positionCount >= InpMaxPositions)
-                            {
-                                PrintFormat("診断結果 (BUY): エントリー見送り (理由: 最大ポジション数到達 %d/%d)", buyGroup.positionCount, InpMaxPositions);
-                            }
-                            else
-                            {
-                                Print("診断 (BUY): 最大ポジション数クリア");
-                                Print("診断結果 (BUY): 全ての条件をクリア。エントリーを実行します。");
-                                PlaceOrder(true, entry_price, g_env_state.total_buy_score);
-                            }
-                        }
-                    }
-                }
+                g_pendingSignal.isValid = true;
+                g_pendingSignal.signalTime = signal_bar[0].time;
+                g_pendingSignal.signalHigh = signal_bar[0].high;
+                g_pendingSignal.signalLow = signal_bar[0].low;
+                g_pendingSignal.signalClose = signal_bar[0].close;
+                g_pendingSignal.isBuySignal = true;
+                g_pendingSignal.signalName = clean_signal_name;
+                g_pendingSignal.expiryBars = 5;
+                PrintFormat("シグナルを検知・待機します: %s", clean_signal_name);
             }
         }
     }
-
-    if(sell_trigger)
+    else if(sell_trigger)
     {
-        PrintFormat("診断 (SELL): 現在の売りスコア = %d, 必要スコア = %d", g_env_state.total_sell_score, InpEntryScore);
-        if (g_env_state.total_sell_score < InpEntryScore)
+        string clean_signal_name = found_sell_signal_raw;
+        StringReplace(clean_signal_name, InpArrowPrefix, "");
+        StringReplace(clean_signal_name, "_", " ");
+
+        if(CanPlaceOrder(false, clean_signal_name, "EA内蔵"))
         {
-            Print("診断結果 (SELL): エントリー見送り (理由: スコア不足)");
-        }
-        else
-        {
-            Print("診断 (SELL): スコア条件クリア");
-            bool is_sell_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL ||
-                                 g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL ||
-                                 g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL ||
-                                 g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL ||
-                                 g_env_state.current_trade_bias == BIAS_SHAKEOUT_SELL);
-            bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_BOUND);
-
-            // ★★★ 新しいロジック: スコア差によるバイアス条件のオーバーライド ★★★
-            bool score_diff_override = InpAllowEntryOnScoreDiff && (g_env_state.total_sell_score - g_env_state.total_buy_score >= InpMinScoreDiffForEntry);
-
-            string bias_jp_text = ""; string temp_icon; color temp_color;
-            TradeBiasToString(g_env_state.current_trade_bias, bias_jp_text, temp_icon, temp_color);
-            PrintFormat("診断 (SELL): 現在の取引バイアス = %s", bias_jp_text);
-            
-            if (!(is_sell_bias || range_entry_ok || score_diff_override))
+            MqlRates signal_bar[];
+            if(CopyRates(_Symbol, _Period, 1, 1, signal_bar) > 0)
             {
-                Print("診断結果 (SELL): エントリー見送り (理由: 取引バイアス不一致、かつスコア差も不足)");
-            }
-            else
-            {
-                 if(score_diff_override && !(is_sell_bias || range_entry_ok))
-                {
-                   PrintFormat("診断 (SELL): バイアスは不一致ですが、スコア差(%d)が閾値(%d)を超えたためエントリー条件をオーバーライドします。", g_env_state.total_sell_score - g_env_state.total_buy_score, InpMinScoreDiffForEntry);
-                }
-                else
-                {
-                   Print("診断 (SELL): バイアス条件クリア");
-                }
-                
-                // ▼▼▼ ここからRRRフィルター ▼▼▼
-                MqlTick tick;
-                if(!SymbolInfoTick(_Symbol, tick)) return;
-
-                double entry_price = tick.bid;
-                double sl_price = CalculateEntryStopLoss(false);
-                double tp_price = zonalFinalTPLine_Sell;
-                if(sl_price <= 0 || tp_price <= 0) {
-                    Print("診断結果 (SELL): エントリー見送り (理由: RRR計算用のSL/TP価格が無効です)");
-                } else {
-                    double risk_distance = MathAbs(entry_price - sl_price);
-                    double reward_distance = MathAbs(tp_price - entry_price);
-
-                    if(risk_distance < _Point) {
-                        Print("診断結果 (SELL): エントリー見送り (理由: リスク値が0のためRRR計算不能)");
-                    } else {
-                        double rrr = reward_distance / risk_distance;
-                        PrintFormat("診断 (SELL): RRR = %.2f (リワード:%.5f / リスク:%.5f), 最低RRR = %.2f", rrr, reward_distance, risk_distance, InpEntry_MinRewardRiskRatio);
-                        if(rrr < InpEntry_MinRewardRiskRatio) {
-                            Print("診断結果 (SELL): エントリー見送り (理由: リスクリワード比が不足)");
-                        } else {
-                            Print("診断 (SELL): RRR条件クリア");
-                            // ▲▲▲ RRRフィルターここまで ▲▲▲
-
-                            if (sellGroup.positionCount >= InpMaxPositions)
-                            {
-                                PrintFormat("診断結果 (SELL): エントリー見送り (理由: 最大ポジション数到達 %d/%d)", sellGroup.positionCount, InpMaxPositions);
-                            }
-                            else
-                            {
-                                Print("診断 (SELL): 最大ポジション数クリア");
-                                Print("診断結果 (SELL): 全ての条件をクリア。エントリーを実行します。");
-                                PlaceOrder(false, entry_price, g_env_state.total_sell_score);
-                            }
-                        }
-                    }
-                }
+                g_pendingSignal.isValid = true;
+                g_pendingSignal.signalTime = signal_bar[0].time;
+                g_pendingSignal.signalHigh = signal_bar[0].high;
+                g_pendingSignal.signalLow = signal_bar[0].low;
+                g_pendingSignal.signalClose = signal_bar[0].close;
+                g_pendingSignal.isBuySignal = false;
+                g_pendingSignal.signalName = clean_signal_name;
+                g_pendingSignal.expiryBars = 5;
+                PrintFormat("シグナルを検知・待機します: %s", clean_signal_name);
             }
         }
     }
-    Print("----------------------------------------------------------");
 }
 
 //+------------------------------------------------------------------+
@@ -1446,12 +1408,16 @@ double CalculateEntryStopLoss(bool isBuy)
 }
 
 //+------------------------------------------------------------------+
-//| 注文を発注する (ATRバッファー付きSLロジック版)
+//| 注文を発注する (トリガー情報記録機能付き)
 //+------------------------------------------------------------------+
-void PlaceOrder(bool isBuy, double price, int score)
+void PlaceOrder(bool isBuy, double price, int score, string signal_name)
 {
     double lot_size = InpEnableRiskBasedLot ? CalculateRiskBasedLotSize(score) : InpLotSize;
-    if (lot_size <= 0) { PrintFormat("ロットサイズの計算結果が0以下のため、エントリーを中止しました。"); return; }
+    if (lot_size <= 0) 
+    {
+        PrintFormat("ロットサイズの計算結果が0以下のため、エントリーを中止しました。");
+        return;
+    }
 
     MqlTradeRequest req;
     MqlTradeResult res;
@@ -1463,8 +1429,12 @@ void PlaceOrder(bool isBuy, double price, int score)
     req.type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
     req.price = NormalizeDouble(price, _Digits);
     req.magic = InpMagicNumber;
-    string bias_text = EnumToString(g_env_state.current_trade_bias) + " [" + EnumToString(g_env_state.current_bias_phase) + "]";
-    req.comment = StringFormat("%s (Score:%d, Bias:%s)", (string)(isBuy ? "Buy" : "Sell"), score, bias_text);
+    
+    // ---【ここを修正】注文コメントにトリガー名を追加 ---
+    string bias_text = EnumToString(g_env_state.current_trade_bias);
+    req.comment = StringFormat("%s (Trigger:%s, Score:%d, Bias:%s)", (string)(isBuy ? "Buy" : "Sell"), signal_name, score, bias_text);
+    // ---【ここまで】---
+
     req.type_filling = ORDER_FILLING_FOK;
 
     if(!OrderSend(req, res))
@@ -1473,7 +1443,10 @@ void PlaceOrder(bool isBuy, double price, int score)
     }
     else
     {
+        // ---【ここを修正】実行ログにトリガー名を追加 ---
         PrintFormat("エントリー実行: %s, Price: %.5f, Lots: %.2f", req.comment, price, lot_size);
+        // ---【ここまで】---
+        
         lastTradeTime = TimeCurrent();
 
         if(res.deal > 0 && HistoryDealSelect(res.deal))
@@ -1487,11 +1460,11 @@ void PlaceOrder(bool isBuy, double price, int score)
                 int size = ArraySize(g_managedPositions);
                 ArrayResize(g_managedPositions, size + 1);
                 g_managedPositions[size] = newPos;
-
+                
                 double sl_base_price = 0;
                 if(InpSlMode == SL_MODE_OPPOSITE_TP) sl_base_price = isBuy ? zonalFinalTPLine_Sell : zonalFinalTPLine_Buy;
                 else if(InpSlMode == SL_MODE_MANUAL) sl_base_price = isBuy ? g_slLinePrice_Buy : g_slLinePrice_Sell;
-
+                
                 if(sl_base_price > 0)
                 {
                     double atr_buffer[1];
@@ -1878,11 +1851,11 @@ void CheckLineSignals(Line &line)
 }
 
 //+------------------------------------------------------------------+
-//| 【大循環ストキャス版】新しいロジックでシグナルをチェックする (モード選択機能付き)
+//| 【大循環ストキャス版】新しいロジックでシグナルをチェックする (パラメータ名修正版)
 //+------------------------------------------------------------------+
 void CheckStochasticSignal()
 {
-    if(!InpStoch_UseDaiJunkan) return;
+    if(!Inp_Enable_Stochastic_Signal) return;
 
     // --- 1. データをバッファにコピー ---
     double main_k_buffer[3], main_d_buffer[3];
@@ -1896,13 +1869,13 @@ void CheckStochasticSignal()
     // --- 2. 基本エントリーシグナルのチェック ---
     bool isBuySignal = (main_d_buffer[1] >= InpMainStoch_Lower_Level && main_d_buffer[2] < InpMainStoch_Lower_Level);
     bool isSellSignal = (main_d_buffer[1] <= InpMainStoch_Upper_Level && main_d_buffer[2] > InpMainStoch_Upper_Level);
-    if(!isBuySignal && !isSellSignal) return; // シグナルがなければここで終了
+    if(!isBuySignal && !isSellSignal) return;
 
     // --- 3. シグナル発生場所の妥当性チェック ---
     bool is_valid_location = false;
     if(InpStoch_SignalMode == MODE_EVERYWHERE)
     {
-        is_valid_location = true; // どこでもOK
+        is_valid_location = true;
     }
     else // MODE_ZONE_ONLY
     {
@@ -1915,13 +1888,11 @@ void CheckStochasticSignal()
                 Line line = allLines[i];
                 double upper_zone = line.price + zoneWidth;
                 double lower_zone = line.price - zoneWidth;
-                // 買いシグナルはサポートゾーン内かチェック
                 if (isBuySignal && line.type == LINE_TYPE_SUPPORT && tick.ask > lower_zone && tick.ask < upper_zone)
                 {
                     is_valid_location = true;
                     break;
                 }
-                // 売りシグナルはレジスタンスゾーン内かチェック
                 if (isSellSignal && line.type == LINE_TYPE_RESISTANCE && tick.bid > lower_zone && tick.bid < upper_zone)
                 {
                     is_valid_location = true;
@@ -1931,11 +1902,10 @@ void CheckStochasticSignal()
         }
     }
     
-    // 場所が不適切ならここで終了
     if(!is_valid_location) return;
 
     // --- 4. フィルター機能の適用 ---
-    bool passes_filter = !InpStoch_UseFilters; // フィルターOFFなら常にtrue
+    bool passes_filter = !InpStoch_UseFilters;
     if(InpStoch_UseFilters)
     {
         bool sub_stoch_ok = (sub_d_buffer[1] <= InpMainStoch_Lower_Level || sub_d_buffer[1] >= InpMainStoch_Upper_Level);
@@ -1953,21 +1923,18 @@ void CheckStochasticSignal()
 }
 
 //+------------------------------------------------------------------+
-//| ゾーン内でのMACDクロスエントリーをチェックする (警告修正版)
+//| ゾーン内でのMACDクロスを「検知」する関数 (最終版)
 //+------------------------------------------------------------------+
 void CheckZoneMacdCross()
 {
+    if(g_pendingSignal.isValid || buyGroup.isActive || sellGroup.isActive) return;
     if (!InpEnableZoneMacdCross || (InpEntryMode != ZONE_MODE)) return;
     static datetime lastZoneCrossEntryTime = 0;
     if (TimeCurrent() < lastZoneCrossEntryTime + PeriodSeconds()) return;
 
     double exec_main[3], exec_signal[3];
-    // ---【修正点】以下の行を削除 ---
-    // ArraySetAsSeries(exec_main, true); ArraySetAsSeries(exec_signal, true); // 不要なため削除
-    
     if (CopyBuffer(h_macd_exec, 0, 0, 3, exec_main) < 3 || CopyBuffer(h_macd_exec, 1, 0, 3, exec_signal) < 3) return;
 
-    // このロジックは「2本前の足と1本前の足の間でクロスが完了したか」をチェックしています
     bool isBuyCross = (exec_main[2] < exec_signal[2] && exec_main[1] > exec_signal[1]);
     bool isSellCross = (exec_main[2] > exec_signal[2] && exec_main[1] < exec_signal[1]);
     if (!isBuyCross && !isSellCross) return;
@@ -1975,31 +1942,44 @@ void CheckZoneMacdCross()
     MqlTick tick;
     if (!SymbolInfoTick(_Symbol, tick)) return;
     double zoneWidth = InpZonePips * g_pip;
-
+    bool is_in_zone = false;
+    
     for (int i = 0; i < ArraySize(allLines); i++)
     {
         Line line = allLines[i];
         double upper_zone = line.price + zoneWidth;
         double lower_zone = line.price - zoneWidth;
-
+        
         if (isBuyCross && line.type == LINE_TYPE_SUPPORT && tick.ask > lower_zone && tick.ask < upper_zone)
         {
-            // エントリー判断はMTF総合スコアを利用するよう修正
-            if (g_env_state.total_buy_score >= InpEntryScore)
-            {
-                PlaceOrder(true, tick.ask, g_env_state.total_buy_score);
-                lastZoneCrossEntryTime = TimeCurrent();
-                return;
-            }
+            is_in_zone = true;
+            break;
         }
         if (isSellCross && line.type == LINE_TYPE_RESISTANCE && tick.bid > lower_zone && tick.bid < upper_zone)
         {
-            // エントリー判断はMTF総合スコアを利用するよう修正
-            if (g_env_state.total_sell_score >= InpEntryScore)
+            is_in_zone = true;
+            break;
+        }
+    }
+    
+    if(is_in_zone)
+    {
+        lastZoneCrossEntryTime = TimeCurrent();
+        string signal_name = isBuyCross ? "Zone MACD Cross Buy" : "Zone MACD Cross Sell";
+        if(CanPlaceOrder(isBuyCross, signal_name, "EA内蔵"))
+        {
+            MqlRates signal_bar[];
+            if(CopyRates(_Symbol, _Period, 1, 1, signal_bar) > 0)
             {
-                PlaceOrder(false, tick.bid, g_env_state.total_sell_score);
-                lastZoneCrossEntryTime = TimeCurrent();
-                return;
+                g_pendingSignal.isValid = true;
+                g_pendingSignal.signalTime = signal_bar[0].time;
+                g_pendingSignal.signalHigh = signal_bar[0].high;
+                g_pendingSignal.signalLow = signal_bar[0].low;
+                g_pendingSignal.signalClose = signal_bar[0].close;
+                g_pendingSignal.isBuySignal = isBuyCross;
+                g_pendingSignal.signalName = signal_name;
+                g_pendingSignal.expiryBars = 5;
+                PrintFormat("シグナルを検知・待機します: %s", signal_name);
             }
         }
     }
@@ -3614,18 +3594,17 @@ void UpdateAllVisuals()
 }
 
 //+------------------------------------------------------------------+
-//| シグナルオブジェクトをチャートに描画する (ログ出力強化版)
+//| シグナルオブジェクトをチャートに描画する (フィルターON/OFF機能付き)
 //+------------------------------------------------------------------+
 void CreateSignalObject(string name, datetime dt, double price, color clr, int code, string msg)
 {
     // --- 統一ゾーン・フィルター ---
-    if(InpUseUniversalZoneFilter)
+    if(Inp_Enable_UniversalZoneFilter) // パラメータ名を新しいものに変更
     {
         bool is_buy = (StringFind(name, "_Buy") > 0);
         bool is_sell = (StringFind(name, "_Sell") > 0);
         if(is_buy || is_sell)
         {
-            // ゾーン内でなければシグナルを棄却し、理由をログに出力
             if(!IsInValidZone(dt, is_buy))
             {
                 PrintFormat("ログ: シグナル棄却 (%s) - 理由: 有効なゾーン外です。", name);
@@ -3634,16 +3613,10 @@ void CreateSignalObject(string name, datetime dt, double price, color clr, int c
         }
     }
 
-    // ▼▼▼【ここから修正】▼▼▼
-    // 渡されたnameに含まれる可能性のある不適切な文字（スペース、コロン）をアンダースコアに置換します。
     string safe_base_name = name;
     StringReplace(safe_base_name, " ", "_");
     StringReplace(safe_base_name, ":", "_");
-
-    // datetime値を直接文字列にキャストして、安全で一意なオブジェクト名を生成します。
-    // これにより、コロンや追加のスペースが含まれるのを防ぎます。
     string uname = safe_base_name + "_" + (string)dt;
-    // ▲▲▲【ここまで修正】▲▲▲
     
     if(ObjectFind(0, uname) < 0 && (TimeCurrent() - lastArrowTime) > 5)
     {
@@ -3655,8 +3628,7 @@ void CreateSignalObject(string name, datetime dt, double price, color clr, int c
             ObjectSetString(0, uname, OBJPROP_FONT, "Wingdings");
             ObjectSetInteger(0, uname, OBJPROP_FONTSIZE, InpSignalFontSize);
             lastArrowTime = TimeCurrent();
-            // シグナルが正常に生成されたことをログに出力
-            PrintFormat("ログ: シグナル生成 (%s) - 価格: %.5f", uname, price); // デバッグ用にユニーク名を出力
+            PrintFormat("ログ: シグナル生成 (%s) - 価格: %.5f", uname, price);
             if(StringLen(msg) > 0) Print(msg);
         }
     }
@@ -3715,20 +3687,21 @@ void CheckActiveEntrySignals(bool &buy_trigger, bool &sell_trigger, string &buy_
 }
 
 //+------------------------------------------------------------------+
-//| 【新規】プライスアクション・シグナルを検知する
+//| 【新規】プライスアクション・シグナルを検知する (パラメータ名修正版)
 //+------------------------------------------------------------------+
 void CheckPriceActionSignal()
 {
-    if(!InpUsePriceActionSignal) return;
+    if(!Inp_Enable_PinBar_Signal_Internal) return;
+    
     MqlRates rates[];
     if(CopyRates(_Symbol, _Period, 1, 1, rates) < 1) return;
+    
     datetime signal_time = rates[0].time;
     double open = rates[0].open, high = rates[0].high, low = rates[0].low, close = rates[0].close;
-
     bool is_bullish_pinbar = false, is_bearish_pinbar = false;
     double body_size = MathAbs(open - close);
     double candle_range = high - low;
-
+    
     if (candle_range > 0 && body_size / candle_range < InpPinbarBodyRatio)
     {
         double upper_wick = high - MathMax(open, close);
@@ -3998,16 +3971,14 @@ datetime FindLineOriginTime(double current_line_price, int buffer_index)
 }
 
 //+------------------------------------------------------------------+
-//| RSIとMAのクロスをチェックしてエントリーを試みる (ロジック修正版)
+//| RSIとMAのクロスを「検知」する関数 (最終版)
 //+------------------------------------------------------------------+
 void CheckRsiMaSignal()
 {
-    // ロジックが無効なら何もしない
-    if(!Inp_RSI_EnableLogic) return;
-
-    // --- 1. 必要なデータを準備 ---
-    // ▼▼▼ ロジック修正 ▼▼▼：2本前の足のデータも必要になるため、取得サイズを増やす
-    int data_size = Inp_RSI_MAPeriod + 3; 
+    if(g_pendingSignal.isValid || buyGroup.isActive || sellGroup.isActive) return;
+    if(!Inp_Enable_RSI_Signal) return;
+    
+    int data_size = Inp_RSI_MAPeriod + 3;
     double rsi_buffer[];
     if(ArrayResize(rsi_buffer, data_size) < 0) return;
     if(CopyBuffer(h_rsi, 0, 0, data_size, rsi_buffer) < data_size)
@@ -4017,8 +3988,6 @@ void CheckRsiMaSignal()
     }
     ArraySetAsSeries(rsi_buffer, true);
 
-    // --- 2. RSIの移動平均を計算 ---
-    // ▼▼▼ ロジック修正 ▼▼▼：判定の主体である「1本前の足」を基準にMAを計算
     double rsi_ma_previous = 0;
     for(int i = 1; i < Inp_RSI_MAPeriod + 1; i++)
     {
@@ -4026,93 +3995,36 @@ void CheckRsiMaSignal()
     }
     rsi_ma_previous /= Inp_RSI_MAPeriod;
 
-    // --- 3. エントリーシグナルをチェック ---
     bool buy_signal = false;
     bool sell_signal = false;
 
-    // ▼▼▼ ロジック修正 ▼▼▼：判定を[2]本前と[1]本前の足で行う
-    // BUYシグナル条件
-    if(rsi_ma_previous >= Inp_RSI_UpperLevel &&      // 1. 1本前のMAが上限レベル以上
-       rsi_buffer[2] >= Inp_RSI_UpperLevel &&      // 2. 2本前のRSIが上限レベル以上
-       rsi_buffer[1] < Inp_RSI_UpperLevel)         // 3. 1本前のRSIが上限レベルを下に抜けた
+    if(rsi_ma_previous >= Inp_RSI_UpperLevel && rsi_buffer[2] >= Inp_RSI_UpperLevel && rsi_buffer[1] < Inp_RSI_UpperLevel)
     {
         buy_signal = true;
     }
 
-    // SELLシグナル条件
-    if(rsi_ma_previous <= Inp_RSI_LowerLevel &&      // 1. 1本前のMAが下限レベル以下
-       rsi_buffer[2] <= Inp_RSI_LowerLevel &&      // 2. 2本前のRSIが下限レベル以下
-       rsi_buffer[1] > Inp_RSI_LowerLevel)         // 3. 1本前のRSIが下限レベルを上に抜けた
+    if(rsi_ma_previous <= Inp_RSI_LowerLevel && rsi_buffer[2] <= Inp_RSI_LowerLevel && rsi_buffer[1] > Inp_RSI_LowerLevel)
     {
         sell_signal = true;
     }
-    // ▲▲▲ ここまで修正 ▲▲▲
 
     if(!buy_signal && !sell_signal) return;
 
-    // --- 4. フィルター条件をチェックしてエントリー ---
-    string signal_name = "";
-    if(buy_signal)
+    string signal_name = buy_signal ? "RSI MA Cross Buy" : "RSI MA Cross Sell";
+    if(CanPlaceOrder(buy_signal, signal_name, "EA内蔵"))
     {
-        signal_name = "RsiMa_Buy";
-        PrintFormat("ログ: 新規ロジックBUYシグナル検知 (%s)", signal_name);
-        
-        bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY ||
-                              g_env_state.current_trade_bias == BIAS_SHAKEOUT_BUY ||
-                              g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY ||
-                              g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY ||
-                              g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY ||
-                              g_env_state.current_trade_bias == BIAS_CONFLICTING_PULLBACK_BUY);
-                              
-        if(!is_valid_bias)
+        MqlRates signal_bar[];
+        if(CopyRates(_Symbol, _Period, 1, 1, signal_bar) > 0)
         {
-            PrintFormat("ログ: %s 見送り (理由: バイアス不一致)", signal_name);
-            return;
-        }
-        
-        // ▼▼▼ ロジック修正 ▼▼▼：シグナルが発生した足（1本前の足）でゾーン判定
-        if(Inp_RSI_UseZoneFilter && !IsInValidZone(iTime(_Symbol, _Period, 1), true))
-        {
-            PrintFormat("ログ: %s 見送り (理由: 有効ゾーン外)", signal_name);
-            return;
-        }
-
-        if(buyGroup.positionCount < InpMaxPositions)
-        {
-            MqlTick tick;
-            if(SymbolInfoTick(_Symbol, tick)) PlaceOrder(true, tick.ask, g_env_state.total_buy_score);
-        }
-    }
-
-    if(sell_signal)
-    {
-        signal_name = "RsiMa_Sell";
-        PrintFormat("ログ: 新規ロジックSELLシグナル検知 (%s)", signal_name);
-
-        bool is_valid_bias = (g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL ||
-                              g_env_state.current_trade_bias == BIAS_SHAKEOUT_SELL ||
-                              g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL ||
-                              g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL ||
-                              g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL ||
-                              g_env_state.current_trade_bias == BIAS_CONFLICTING_PULLBACK_SELL);
-
-        if(!is_valid_bias)
-        {
-            PrintFormat("ログ: %s 見送り (理由: バイアス不一致)", signal_name);
-            return;
-        }
-        
-        // ▼▼▼ ロジック修正 ▼▼▼：シグナルが発生した足（1本前の足）でゾーン判定
-        if(Inp_RSI_UseZoneFilter && !IsInValidZone(iTime(_Symbol, _Period, 1), false))
-        {
-            PrintFormat("ログ: %s 見送り (理由: 有効ゾーン外)", signal_name);
-            return;
-        }
-        
-        if(sellGroup.positionCount < InpMaxPositions)
-        {
-            MqlTick tick;
-            if(SymbolInfoTick(_Symbol, tick)) PlaceOrder(false, tick.bid, g_env_state.total_sell_score);
+            g_pendingSignal.isValid = true;
+            g_pendingSignal.signalTime = signal_bar[0].time;
+            g_pendingSignal.signalHigh = signal_bar[0].high;
+            g_pendingSignal.signalLow = signal_bar[0].low;
+            g_pendingSignal.signalClose = signal_bar[0].close;
+            g_pendingSignal.isBuySignal = buy_signal;
+            g_pendingSignal.signalName = signal_name;
+            g_pendingSignal.expiryBars = 5;
+            PrintFormat("シグナルを検知・待機します: %s", signal_name);
         }
     }
 }
@@ -4519,5 +4431,289 @@ void UpdateInfoPanel_Timer()
     if(ObjectFind(0, text_obj_name) >= 0)
     {
        ObjectSetString(0, text_obj_name, OBJPROP_TEXT, text);
+    }
+}
+
+//+------------------------------------------------------------------+
+//| インジケーターからの全PAシグナルを「検知」する関数 (最終版)
+//+------------------------------------------------------------------+
+void CheckUnifiedSignalEntry()
+{
+    if(g_pendingSignal.isValid || buyGroup.isActive || sellGroup.isActive) return;
+    if(h_pa_signal_indicator == INVALID_HANDLE) return;
+
+    double buy_signals[1], sell_signals[1];
+    string triggered_pattern = "";
+
+    if(CopyBuffer(h_pa_signal_indicator, 0, 1, 1, buy_signals) > 0 && buy_signals[0] > 0) triggered_pattern = "PinBar Buy";
+    else if(CopyBuffer(h_pa_signal_indicator, 2, 1, 1, buy_signals) > 0 && buy_signals[0] > 0) triggered_pattern = "Engulfing Buy";
+    else if(CopyBuffer(h_pa_signal_indicator, 4, 1, 1, buy_signals) > 0 && buy_signals[0] > 0) triggered_pattern = "InsideBar Buy";
+    else if(CopyBuffer(h_pa_signal_indicator, 6, 1, 1, buy_signals) > 0 && buy_signals[0] > 0) triggered_pattern = "Synthetic Buy";
+    
+    if(triggered_pattern == ""){
+        if(CopyBuffer(h_pa_signal_indicator, 1, 1, 1, sell_signals) > 0 && sell_signals[0] > 0) triggered_pattern = "PinBar Sell";
+        else if(CopyBuffer(h_pa_signal_indicator, 3, 1, 1, sell_signals) > 0 && sell_signals[0] > 0) triggered_pattern = "Engulfing Sell";
+        else if(CopyBuffer(h_pa_signal_indicator, 5, 1, 1, sell_signals) > 0 && sell_signals[0] > 0) triggered_pattern = "InsideBar Sell";
+        else if(CopyBuffer(h_pa_signal_indicator, 7, 1, 1, sell_signals) > 0 && sell_signals[0] > 0) triggered_pattern = "Synthetic Sell";
+    }
+
+    if(triggered_pattern != "")
+    {
+        bool is_buy = (StringFind(triggered_pattern, "Buy") >= 0);
+        if(CanPlaceOrder(is_buy, triggered_pattern, "PAインジ"))
+        {
+            MqlRates signal_bar[];
+            if(CopyRates(_Symbol, _Period, 1, 1, signal_bar) > 0)
+            {
+                g_pendingSignal.isValid = true;
+                g_pendingSignal.signalTime = signal_bar[0].time;
+                g_pendingSignal.signalHigh = signal_bar[0].high;
+                g_pendingSignal.signalLow = signal_bar[0].low;
+                g_pendingSignal.signalClose = signal_bar[0].close;
+                g_pendingSignal.isBuySignal = is_buy;
+                g_pendingSignal.signalName = triggered_pattern;
+                g_pendingSignal.expiryBars = 5;
+                PrintFormat("シグナルを検知・待機します: %s", triggered_pattern);
+            }
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 全シグナル共通のエントリー最終承認フィルター (統一ログ出力版)
+//+------------------------------------------------------------------+
+bool CanPlaceOrder(bool is_buy, string signal_name, string source_system)
+{
+    string log_prefix = "[" + source_system + "] シグナル: " + signal_name + " ->";
+
+    // --- フィルター1: スコア ---
+    if(Inp_Enable_ScoreFilter)
+    {
+        int score = is_buy ? g_env_state.total_buy_score : g_env_state.total_sell_score;
+        if(score < InpEntryScore)
+        {
+            PrintFormat("%s アクション: 見送り (理由: スコア不足 %d/%d)", log_prefix, score, InpEntryScore);
+            return false;
+        }
+    }
+
+    // --- フィルター2: 取引バイアス (例外設定を含む) ---
+    if(Inp_Enable_TradeBiasFilter)
+    {
+        bool is_buy_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_BUY || g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_BUY || g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_BUY || g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_BUY || g_env_state.current_trade_bias == BIAS_SHAKEOUT_BUY);
+        bool is_sell_bias = (g_env_state.current_trade_bias == BIAS_DOMINANT_CORE_TREND_SELL || g_env_state.current_trade_bias == BIAS_DOMINANT_PULLBACK_SELL || g_env_state.current_trade_bias == BIAS_ALIGNED_CORE_TREND_SELL || g_env_state.current_trade_bias == BIAS_ALIGNED_EARLY_ENTRY_SELL || g_env_state.current_trade_bias == BIAS_SHAKEOUT_SELL);
+        
+        bool range_entry_ok = (InpAllowRangeEntry && g_env_state.current_trade_bias == BIAS_RANGE_BOUND);
+        bool score_diff_override = InpAllowEntryOnScoreDiff && (is_buy ? (g_env_state.total_buy_score - g_env_state.total_sell_score >= InpMinScoreDiffForEntry) : (g_env_state.total_sell_score - g_env_state.total_buy_score >= InpMinScoreDiffForEntry));
+
+        if(!((is_buy && is_buy_bias) || (!is_buy && is_sell_bias) || range_entry_ok || score_diff_override))
+        {
+            string bias_jp_text = ""; string temp_icon; color temp_color;
+            TradeBiasToString(g_env_state.current_trade_bias, bias_jp_text, temp_icon, temp_color);
+            PrintFormat("%s アクション: 見送り (理由: 取引バイアス不一致 [現在: %s])", log_prefix, bias_jp_text);
+            return false;
+        }
+    }
+
+    // --- フィルター3: リスクリワード比 (RRR) ---
+    if(Inp_Enable_RRR_Filter)
+    {
+        MqlTick tick;
+        if(!SymbolInfoTick(_Symbol, tick)) return false;
+        
+        double entry_price = is_buy ? tick.ask : tick.bid;
+        double sl_price = CalculateEntryStopLoss(is_buy);
+        double tp_price = is_buy ? zonalFinalTPLine_Buy : zonalFinalTPLine_Sell;
+
+        if(sl_price <= 0 || tp_price <= 0) { PrintFormat("%s アクション: 見送り (理由: RRR計算用のSL/TP価格が無効)", log_prefix); return false; }
+        double risk_distance = MathAbs(entry_price - sl_price);
+        if(risk_distance < _Point) { PrintFormat("%s アクション: 見送り (理由: リスク値が0のためRRR計算不能)", log_prefix); return false; }
+        double reward_distance = MathAbs(tp_price - entry_price);
+        double rrr = reward_distance / risk_distance;
+        
+        if(rrr < InpEntry_MinRewardRiskRatio) { PrintFormat("%s アクション: 見送り (理由: RRR不足 %.2f/%.2f)", log_prefix, rrr, InpEntry_MinRewardRiskRatio); return false; }
+    }
+
+    // --- 全てのフィルターを通過 ---
+    PrintFormat("%s アクション: 承認 (全フィルター通過)", log_prefix);
+    return true;
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】全てのエントリーシグナルを「検知」するための統合関数
+//+------------------------------------------------------------------+
+void DetectEntrySignals()
+{
+    // すでに保留中のシグナルがある場合、またはポジションがある場合は新しいシグナルを探さない
+    if(g_pendingSignal.isValid || buyGroup.isActive || sellGroup.isActive) return;
+
+    // --- ここで各シグナルチェック関数を呼び出す ---
+    // ※今後、これらの関数はPlaceOrderを直接呼び出すのではなく、g_pendingSignalに情報をセットする役割になる
+    
+    if(Inp_Enable_PA_Indicator_Signal)    CheckUnifiedSignalEntry();
+    if(Inp_Enable_Stochastic_Signal)      CheckStochasticSignal();
+    if(Inp_Enable_RSI_Signal)             CheckRsiMaSignal();        
+    if(Inp_Enable_PinBar_Signal_Internal) CheckPriceActionSignal();
+    
+    // CheckEntryはフィルターと実行の塊なので、ここでは呼び出さない
+}
+
+//+------------------------------------------------------------------+
+//| 保留中のシグナルを管理し、エントリー実行を判断する (監視方式 実装版)
+//+------------------------------------------------------------------+
+void ManagePendingEntry()
+{
+    if(!g_pendingSignal.isValid) return;
+
+    int bars_since_signal = iBarShift(_Symbol, _Period, g_pendingSignal.signalTime);
+    if(bars_since_signal > g_pendingSignal.expiryBars)
+    {
+        PrintFormat("シグナル (%s) は有効期限切れのため破棄されました。", g_pendingSignal.signalName);
+        CancelPendingOrders();
+        g_pendingSignal.isValid = false;
+        return;
+    }
+
+    if(g_pending_order_ticket > 0) return;
+
+    switch(InpEntryExecutionMode)
+    {
+        case MODE_INSTANT:
+        {
+            // (変更なし)
+            PrintFormat("実行モード [即時]: シグナル (%s) のエントリーを試みます。", g_pendingSignal.signalName);
+            if(CanPlaceOrder(g_pendingSignal.isBuySignal, g_pendingSignal.signalName, g_pendingSignal.isBuySignal ? "PAインジ" : "EA内蔵"))
+            {
+                MqlTick tick;
+                if(SymbolInfoTick(_Symbol, tick))
+                {
+                    double price = g_pendingSignal.isBuySignal ? tick.ask : tick.bid;
+                    int score = g_pendingSignal.isBuySignal ? g_env_state.total_buy_score : g_env_state.total_sell_score;
+                    PlaceOrder(g_pendingSignal.isBuySignal, price, score, g_pendingSignal.signalName);
+                }
+            }
+            g_pendingSignal.isValid = false;
+            break;
+        }
+
+        case MODE_STOP:
+        {
+            // (変更なし)
+            MqlTradeRequest request;
+            MqlTradeResult  result;
+            ZeroMemory(request);
+            double buffer = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
+            double entry_price = 0, sl_price = 0, tp_price = 0;
+            int score = 0;
+            if(g_pendingSignal.isBuySignal){ request.type = ORDER_TYPE_BUY_STOP; entry_price = g_pendingSignal.signalHigh + buffer; sl_price = g_pendingSignal.signalLow - buffer; tp_price = isBuyTPManuallyMoved ? ObjectGetDouble(0, "TPLine_Buy", OBJPROP_PRICE, 0) : zonalFinalTPLine_Buy; score = g_env_state.total_buy_score; }
+            else { request.type = ORDER_TYPE_SELL_STOP; entry_price = g_pendingSignal.signalLow - buffer; sl_price = g_pendingSignal.signalHigh + buffer; tp_price = isSellTPManuallyMoved ? ObjectGetDouble(0, "TPLine_Sell", OBJPROP_PRICE, 0) : zonalFinalTPLine_Sell; score = g_env_state.total_sell_score; }
+            request.action = TRADE_ACTION_PENDING; request.symbol = _Symbol; request.volume = InpEnableRiskBasedLot ? CalculateRiskBasedLotSize(score) : InpLotSize; request.price = NormalizeDouble(entry_price, _Digits); request.sl = NormalizeDouble(sl_price, _Digits); if(tp_price > 0) request.tp = NormalizeDouble(tp_price, _Digits); request.magic = InpMagicNumber; request.comment = StringFormat("Pending: %s", g_pendingSignal.signalName); request.type_time = ORDER_TIME_GTC;
+            if(!OrderSend(request, result)){ PrintFormat("ストップオーダーの設置に失敗しました。エラー: %d", GetLastError()); }
+            else { g_pending_order_ticket = result.order; PrintFormat("実行モード [ストップ]: %s のためのストップオーダー(#%d)を %.5f に設置しました。", g_pendingSignal.signalName, g_pending_order_ticket, entry_price); }
+            g_pendingSignal.isValid = false;
+            break;
+        }
+
+        case MODE_LIMIT:
+        {
+            // (変更なし)
+            MqlTradeRequest request;
+            MqlTradeResult  result;
+            ZeroMemory(request);
+            double entry_price = (g_pendingSignal.signalHigh + g_pendingSignal.signalLow) / 2.0;
+            double sl_price = 0, tp_price = 0;
+            int score = 0;
+            if(g_pendingSignal.isBuySignal){ request.type = ORDER_TYPE_BUY_LIMIT; sl_price = g_pendingSignal.signalLow - (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point); tp_price = isBuyTPManuallyMoved ? ObjectGetDouble(0, "TPLine_Buy", OBJPROP_PRICE, 0) : zonalFinalTPLine_Buy; score = g_env_state.total_buy_score; }
+            else { request.type = ORDER_TYPE_SELL_LIMIT; sl_price = g_pendingSignal.signalHigh + (SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point); tp_price = isSellTPManuallyMoved ? ObjectGetDouble(0, "TPLine_Sell", OBJPROP_PRICE, 0) : zonalFinalTPLine_Sell; score = g_env_state.total_sell_score; }
+            request.action = TRADE_ACTION_PENDING; request.symbol = _Symbol; request.volume = InpEnableRiskBasedLot ? CalculateRiskBasedLotSize(score) : InpLotSize; request.price = NormalizeDouble(entry_price, _Digits); request.sl = NormalizeDouble(sl_price, _Digits); if(tp_price > 0) request.tp = NormalizeDouble(tp_price, _Digits); request.magic = InpMagicNumber; request.comment = StringFormat("Pending: %s", g_pendingSignal.signalName); request.type_time = ORDER_TIME_GTC;
+            if(!OrderSend(request, result)){ PrintFormat("リミットオーダーの設置に失敗しました。エラー: %d", GetLastError()); }
+            else { g_pending_order_ticket = result.order; PrintFormat("実行モード [リミット]: %s のためのリミットオーダー(#%d)を %.5f に設置しました。", g_pendingSignal.signalName, g_pending_order_ticket, entry_price); }
+            g_pendingSignal.isValid = false;
+            break;
+        }
+
+        case MODE_MONITOR:
+        {
+            // シグナル足の次の足からチェックするため、bars_since_signalが1以上でなければ何もしない
+            if(bars_since_signal < 1) break;
+
+            MqlRates current_bar[];
+            if(CopyRates(_Symbol, _Period, 0, 1, current_bar) < 1) break;
+
+            if(g_pendingSignal.isBuySignal)
+            {
+                // --- 監視中止（無効化）条件 ---
+                if(current_bar[0].low < g_pendingSignal.signalLow)
+                {
+                    PrintFormat("実行モード [監視]: シグナル(%s)は安値を更新したため無効化されました。", g_pendingSignal.signalName);
+                    g_pendingSignal.isValid = false;
+                    break;
+                }
+                // --- エントリー実行条件 ---
+                if(current_bar[0].close > g_pendingSignal.signalClose)
+                {
+                    PrintFormat("実行モード [監視]: シグナル(%s)の買い条件が成立しました。エントリーを実行します。", g_pendingSignal.signalName);
+                    MqlTick tick;
+                    if(SymbolInfoTick(_Symbol, tick))
+                    {
+                        int score = g_env_state.total_buy_score;
+                        PlaceOrder(true, tick.ask, score, g_pendingSignal.signalName);
+                    }
+                    g_pendingSignal.isValid = false; // 処理後はシグナルをクリア
+                }
+            }
+            else // 売りシグナルの場合
+            {
+                // --- 監視中止（無効化）条件 ---
+                if(current_bar[0].high > g_pendingSignal.signalHigh)
+                {
+                    PrintFormat("実行モード [監視]: シグナル(%s)は高値を更新したため無効化されました。", g_pendingSignal.signalName);
+                    g_pendingSignal.isValid = false;
+                    break;
+                }
+                // --- エントリー実行条件 ---
+                if(current_bar[0].close < g_pendingSignal.signalClose)
+                {
+                    PrintFormat("実行モード [監視]: シグナル(%s)の売り条件が成立しました。エントリーを実行します。", g_pendingSignal.signalName);
+                    MqlTick tick;
+                    if(SymbolInfoTick(_Symbol, tick))
+                    {
+                        int score = g_env_state.total_sell_score;
+                        PlaceOrder(false, tick.bid, score, g_pendingSignal.signalName);
+                    }
+                    g_pendingSignal.isValid = false; // 処理後はシグナルをクリア
+                }
+            }
+            break;
+        }
+    }
+}
+
+//+------------------------------------------------------------------+
+//| 【新規】保留中の注文をキャンセルする
+//+------------------------------------------------------------------+
+void CancelPendingOrders()
+{
+    if(g_pending_order_ticket > 0)
+    {
+        MqlTradeRequest request;
+        MqlTradeResult  result;
+        ZeroMemory(request);
+        ZeroMemory(result);
+
+        request.action = TRADE_ACTION_REMOVE;
+        request.order  = g_pending_order_ticket;
+
+        if(!OrderSend(request, result))
+        {
+            PrintFormat("保留注文 #%d のキャンセルに失敗しました。エラー: %d", g_pending_order_ticket, GetLastError());
+        }
+        else
+        {
+            PrintFormat("保留注文 #%d をキャンセルしました。", g_pending_order_ticket);
+        }
+        
+        // 成功・失敗に関わらずチケット番号をクリアし、再度のキャンセル試行を防ぐ
+        g_pending_order_ticket = 0;
     }
 }

@@ -5,8 +5,8 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2025, Your Name"
 #property link      "https://www.mql5.com"
-#property version   "7.61"
-#property description "Ver7.62: パラメータ整理　パフォーマンス改善 MTFスイング分析実装　バイアス新定義、TP至近スキップ HTインジ対応　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
+#property version   "7.63"
+#property description "Ver7.63: build5200対応　パラメータ整理　パフォーマンス改善 MTFスイング分析実装　バイアス新定義、TP至近スキップ HTインジ対応　MTF対応傾斜ダイナミクスと大循環MACDを統合したFSM分析エンジン。日本語コメントを完全復元。"
 
 //+------------------------------------------------------------------+
 //|                            定数定義                              |
@@ -580,7 +580,7 @@ bool IsInValidZone(datetime signal_time, bool is_buy_signal); // ? この行を�
 bool InitSlopeAtr();
 ENUM_SLOPE_STATE GetSlopeState(int ma_handle, int lookback);
 ENUM_MASTER_STATE GetMasterState(int primary_stage, int prev_primary_stage, ENUM_SLOPE_STATE slope_long, ENUM_SLOPE_STATE slope_short, const DaijunkanMACDValues &macd_values);
-DaijunkanMACDValues CalculateDaijunkanMACD();
+DaijunkanMACDValues CalculateDaijunkanMACD(ENUM_TIMEFRAMES tf_period, int short_ma_handle, int middle_ma_handle, int long_ma_handle);
 void CheckActiveEntrySignals(bool &buy_trigger, bool &sell_trigger, string &buy_signal_name, string &sell_signal_name); // ← この行を確認
 int GetPrimaryStage(int shift);
 string MasterStateToString(ENUM_MASTER_STATE state, color &out_color);
